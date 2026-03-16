@@ -1,0 +1,35 @@
+# Secrets
+secrets.json
+.env
+!.env.example
+
+# Test scripts with credentials
+test_connection.py
+
+# Lock files
+uv.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+judge-venv/
+
+# OpenEnv outputs
+outputs/
+*.jsonl
+
+# W&B
+wandb/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

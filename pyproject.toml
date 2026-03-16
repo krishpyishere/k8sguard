@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "k8sguard"
+version = "0.1.0"
+description = "K8sGuard — Train defensive security agents for Kubernetes"
+requires-python = ">=3.10"
+dependencies = [
+    # Core OpenEnv runtime
+    "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git@v0.2.1",
+    # K8s
+    "kubernetes>=28.0.0",
+    "requests>=2.25.0",
+    # Formatting
+    "tabulate>=0.9.0",
+    # LLM backends
+    "openai>=1.0.0",
+    "anthropic>=0.39.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "trl[vllm]==0.29.0",
+    "vllm==0.11.2",
+    "torch>=2.8.0,<2.10.0",
+    "accelerate",
+    "peft",
+    "transformers",
+    "datasets",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+k8sguard-server = "k8sguard.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["k8sguard", "k8sguard.server"]
+package-dir = { "k8sguard" = ".", "k8sguard.server" = "server" }
