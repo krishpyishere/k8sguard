@@ -136,6 +136,7 @@ def parse_args() -> argparse.Namespace:
         help="vLLM mode: colocate (1 GPU) or server (separate vLLM process)",
     )
     parser.add_argument("--vllm-server-url", default="http://localhost:8000", help="vLLM server URL (server mode)")
+    parser.add_argument("--vllm-server-timeout", type=float, default=60.0, help="Seconds to wait for vLLM server")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--logging-steps", type=int, default=1)
     return parser.parse_args()
@@ -337,6 +338,7 @@ def main() -> None:
         use_vllm=True,
         vllm_mode=args.vllm_mode,
         vllm_server_base_url=args.vllm_server_url if args.vllm_mode == "server" else None,
+        vllm_server_timeout=args.vllm_server_timeout,
         output_dir=str(output_dir),
         max_steps=args.max_steps,
         num_train_epochs=args.num_epochs,
