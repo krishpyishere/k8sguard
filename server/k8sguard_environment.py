@@ -80,9 +80,8 @@ class K8sGuardEnvironment(Environment):
         self.found_findings = []
 
         if self.mode == "training":
-            # Clean up previous training resources
+            # Clean up previous training resources (cleanup polls until empty)
             self.injector.cleanup(self._training_namespace)
-            time.sleep(2)
 
             # Generate and inject a vulnerability scenario
             difficulty = float(os.environ.get("DIFFICULTY", "0.3"))
