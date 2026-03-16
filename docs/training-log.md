@@ -12,9 +12,11 @@ Live training run on Lambda Cloud 8xH100 80GB instance.
 
 | GPU | Role | Model | Memory |
 |-----|------|-------|--------|
-| 0 | GRPO training (LoRA) | Qwen3-8B | ~69 GB |
+| 0 | GRPO training (LoRA + colocate vLLM) | Qwen3-8B | ~57 GB |
 | 1-5 | Available for DDP scaling | — | — |
-| 6-7 | Judge vLLM (TP=2) | Nemotron-120B NVFP4 | ~80 GB each |
+| 6-7 | Judge vLLM (TP=2) | Nemotron-120B FP8 | ~76 GB each |
+
+Judge requires vLLM 0.17.1 (separate `judge-venv`), not vLLM 0.11.2 from the training env.
 
 ## Runtime Bugs Found and Fixed
 
@@ -46,11 +48,15 @@ The `kubernetes` Python client v35.0.0 renamed `client.V1Subject` to `client.Rba
 
 **Fix:** Run the judge as `python -m vllm.entrypoints.openai.api_server` instead of `trl vllm-serve`.
 
-### 5. Nemotron-120B FP8 model dimension constraints
+### 5. Nemotron-120B model constraints
 
-The model has hidden dimensions (9984, 9728) that are only divisible by powers of 2. TP=2, TP=4, TP=8 are valid; TP=3, TP=5, TP=6, TP=7 all fail with `AssertionError: <dim> is not divisible by <tp>`.
+**Tensor parallelism:** Hidden dimensions (9984, 9728) are only divisible by powers of 2. TP=2, TP=4, TP=8 work; TP=3, TP=5, TP=6, TP=7 fail with `AssertionError: <dim> is not divisible by <tp>`.
 
-FP8 variant OOMs on TP=2 (2x80GB) and TP=4 (4x80GB) because the BF16 intermediate activations exceed available memory. NVFP4 variant fits on TP=2.
+**FP8 variant:** OOMs on TP=2 with vLLM 0.11.2 due to BF16 intermediate activations. Works on TP=2 with vLLM 0.17.1 (judge-venv) using `--kv-cache-dtype fp8 --attention-backend TRITON_ATTN --swap-space 0`. Uses ~76GB per GPU.
+
+**NVFP4 variant:** Fails with `CUDA error: unsupported PTX toolchain` on vLLM 0.17.1 (needs newer CUDA toolkit). Not tested on vLLM 0.11.2 (ModelOpt validation error).
+
+**Working config:** FP8 variant + vLLM 0.17.1 + TP=2 + `--kv-cache-dtype fp8 --attention-backend TRITON_ATTN`.
 
 ### 6. Qwen3 `enable_thinking=False` kwarg
 
@@ -60,8 +66,16 @@ FP8 variant OOMs on TP=2 (2x80GB) and TP=4 (4x80GB) because the BF16 intermediat
 
 ## First Training Run Observations
 
-- Step 1/200 completed in ~102 seconds (4 rollout episodes per step, 25 env steps each)
+- Step 1/200 completed in ~102 seconds with Qwen3-14B judge (4 rollout episodes per step, 25 env steps each)
 - Untrained model repeats the same commands (gets blocked after 3 repeats, -0.5 penalty)
 - Heuristic judge handles ~80% of actions without LLM calls
 - Judge LLM fallback requires OpenAI-compatible `/v1/chat/completions` endpoint
 - Environment correctly injects vulnerabilities and resets between episodes
+
+### Nemotron-120B judge vs Qwen3-14B judge
+
+Nemotron provides significantly more detailed feedback:
+- Qwen3-14B: `"Good investigation step."` or `"Judge error: NotFoundError"`
+- Nemotron-120B: `"The command lists deployments across all namespaces but does not inspect image tags or security contexts"` and `"The command attempts to list daemonsets but uses an incorrect resource type"`
+
+The richer feedback signal should help the agent learn faster — it gets specific guidance on what to try next, not just a score.
