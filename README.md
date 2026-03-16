@@ -64,6 +64,20 @@
 
 The agent learns to scan systematically across five security domains, identify real misconfigurations, and apply correct fixes — all on a live cluster.
 
+### Training Results (live 8xH100 run)
+
+<p align="center">
+  <img src="assets/reward_curve.png" alt="GRPO Training Reward Curve" width="700">
+</p>
+
+Real reward curve from an active training run: Qwen3-8B + LoRA on 5-GPU DDP with Nemotron-120B FP8 judge. The agent goes from -1.0 (random scanning, repeated commands) to +3.5 average in ~48 GRPO steps. Best single episode: +4.62.
+
+<p align="center">
+  <img src="assets/finding_vs_remediation.png" alt="Finding vs Remediation Reward" width="700">
+</p>
+
+The agent quickly learns to **find** vulnerabilities (green, rising to +2.5) but **remediation** remains negative — it identifies issues correctly but hasn't yet learned the right kubectl fix commands. This is expected early in training; remediation requires more episodes to learn.
+
 ## Training Quickstart
 
 ### Prerequisites
