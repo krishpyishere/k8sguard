@@ -90,21 +90,41 @@ bash deploy/setup.sh    # Installs k3s, kubectl, Python deps, creates training n
 
 ```bash
 # Terminal 1: Judge model (scores agent actions)
-trl vllm-serve --model Qwen/Qwen3-14B --host 0.0.0.0 --port 8001
+# Option A: Nemotron-120B FP8 on 2 GPUs (best quality, requires separate venv with vLLM 0.17+)
+CUDA_VISIBLE_DEVICES=6,7 python -m vllm.entrypoints.openai.api_server \
+  --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 \
+  --port 8001 --tensor-parallel-size 2 --gpu-memory-utilization 0.9 \
+  --max-model-len 4096 --enforce-eager --trust-remote-code \
+  --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --swap-space 0
+
+# Option B: Qwen3-14B on 1 GPU (lighter, works with same venv)
+# CUDA_VISIBLE_DEVICES=7 python -m vllm.entrypoints.openai.api_server \
+#   --model Qwen/Qwen3-14B --port 8001 --gpu-memory-utilization 0.9 \
+#   --max-model-len 4096 --enforce-eager
 
 # Terminal 2: K8sGuard environment (injects vulns, executes commands)
-LLM_BACKEND=openai LLM_BASE_URL=http://localhost:8001/v1 \
+LLM_BACKEND=openai LLM_BASE_URL=http://localhost:8001/v1 LLM_API_KEY=local \
   python -m server.app --scan-mode training
 
 # Terminal 3: GRPO training (fine-tunes the agent)
-python train.py \
+CUDA_VISIBLE_DEVICES=0 python train.py \
   --model-id Qwen/Qwen3-8B \
   --vllm-mode colocate \
   --max-steps 200 \
-  --dataset-size 50
+  --dataset-size 100
 ```
 
 The trainer runs GRPO episodes: the agent scans the cluster, the judge scores each action, and LoRA weights are updated. Checkpoints are saved to `outputs/`.
+
+### Tested on 8xH100
+
+We validated the full pipeline on Lambda Cloud 8xH100 80GB. See [`docs/training-log.md`](docs/training-log.md) for runtime bugs found, GPU layout, and Nemotron judge configuration details.
+
+| GPU | Role | Memory |
+|-----|------|--------|
+| 0 | GRPO training (Qwen3-8B + LoRA) | ~57 GB |
+| 1-5 | Available for DDP scaling | — |
+| 6-7 | Judge vLLM (Nemotron-120B FP8, TP=2) | ~76 GB each |
 
 ## Using a Trained Agent
 
