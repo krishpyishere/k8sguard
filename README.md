@@ -116,15 +116,51 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 
 The trainer runs GRPO episodes: the agent scans the cluster, the judge scores each action, and LoRA weights are updated. Checkpoints are saved to `outputs/`.
 
-### Tested on 8xH100
+### Multi-GPU DDP training (8xH100)
 
-We validated the full pipeline on Lambda Cloud 8xH100 80GB. See [`docs/training-log.md`](docs/training-log.md) for runtime bugs found, GPU layout, and Nemotron judge configuration details.
+For full-scale training using all GPUs, use 4 terminals:
+
+```bash
+# Terminal 1: Judge — Nemotron-120B FP8 on GPUs 6-7 (requires separate venv with vLLM 0.17+)
+CUDA_VISIBLE_DEVICES=6,7 python -m vllm.entrypoints.openai.api_server \
+  --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 \
+  --port 8001 --tensor-parallel-size 2 --gpu-memory-utilization 0.9 \
+  --max-model-len 4096 --enforce-eager --trust-remote-code \
+  --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --swap-space 0
+
+# Terminal 2: Agent vLLM on GPU 5 (serves generations for all training ranks)
+CUDA_VISIBLE_DEVICES=5 trl vllm-serve \
+  --model Qwen/Qwen3-8B --port 8002 \
+  --tensor_parallel_size 1 --max_model_len 8192 \
+  --enforce_eager --gpu_memory_utilization 0.9
+
+# Terminal 3: K8sGuard environment
+LLM_BACKEND=openai LLM_MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 \
+  LLM_BASE_URL=http://localhost:8001/v1 LLM_API_KEY=local \
+  python -m server.app --scan-mode training
+
+# Terminal 4: 5-GPU DDP training on GPUs 0-4
+TORCH_NCCL_ENABLE_MONITORING=0 TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=7200 \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4 torchrun --nproc_per_node=5 --master_port=29500 \
+  train.py \
+    --model-id Qwen/Qwen3-8B \
+    --vllm-mode server \
+    --vllm-server-url http://localhost:8002 \
+    --vllm-server-timeout 120 \
+    --max-steps 200 --dataset-size 100 \
+    --num-generations 10 --gradient-accumulation-steps 4 \
+    --temperature 0.8 --save-steps 20
+```
 
 | GPU | Role | Memory |
 |-----|------|--------|
-| 0 | GRPO training (Qwen3-8B + LoRA) | ~57 GB |
-| 1-5 | Available for DDP scaling | — |
+| 0-4 | 5-GPU DDP training (Qwen3-8B + LoRA) | ~36 GB each |
+| 5 | Agent vLLM (`trl vllm-serve`) | ~78 GB |
 | 6-7 | Judge vLLM (Nemotron-120B FP8, TP=2) | ~76 GB each |
+
+`num_generations` must be divisible by `nproc_per_node`. NCCL watchdog is disabled because rollouts take minutes (ranks idle during generation).
+
+See [`docs/training-log.md`](docs/training-log.md) for runtime bugs found, GPU constraints, and Nemotron configuration details.
 
 ## Using a Trained Agent
 
