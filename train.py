@@ -40,8 +40,44 @@ from trl.experimental.openenv import generate_rollout_completions
 
 from k8sguard import K8sGuardEnv, K8sGuardAction
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(name)s:%(lineno)d: %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
+
+
+# ---- TRL 0.29.0 / vLLM 0.11.x compatibility ----
+# TRL 0.29.0 expects vLLM logprobs as list-of-lists (top-k per token),
+# but vLLM 0.11.x returns plain floats. Patch until TRL releases a fix.
+
+_orig_vllm_gen = None
+
+def _patch_vllm_generate(trainer):
+    """Wrap vLLM generate to ensure logprobs are in top-k list format."""
+    global _orig_vllm_gen
+    if _orig_vllm_gen is not None or not hasattr(trainer, 'vllm_generation'):
+        return
+    _orig_vllm_gen = trainer.vllm_generation.generate
+
+    def _wrapped_generate(**kwargs):
+        result = _orig_vllm_gen(**kwargs)
+        prompt_ids, completion_ids, logprobs, *rest = result
+        if logprobs and logprobs[0] and isinstance(logprobs[0][0], float):
+            logprobs = [[[lp] for lp in seq] for seq in logprobs]
+        return (prompt_ids, completion_ids, logprobs, *rest)
+
+    trainer.vllm_generation.generate = _wrapped_generate
+
+def patch_trl_vllm_compat():
+    """Apply TRL/vLLM compatibility patches. Call before trainer.train()."""
+    _orig_train = GRPOTrainer.train
+
+    def _patched_train(self, *args, **kwargs):
+        _patch_vllm_generate(self)
+        return _orig_train(self, *args, **kwargs)
+
+    GRPOTrainer.train = _patched_train
+
+patch_trl_vllm_compat()
 
 
 # ============================================================
@@ -309,7 +345,6 @@ def main() -> None:
         per_device_train_batch_size=1,
         num_generations=args.num_generations,
         max_completion_length=args.max_new_tokens,
-        max_prompt_length=2048,
         logging_steps=args.logging_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
