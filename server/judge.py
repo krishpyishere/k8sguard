@@ -92,7 +92,18 @@ class SecurityJudge:
                         or vuln.category in finding_text
                         or vuln.resource_name in finding_text):
                     sev_bonus = SEVERITY_ORDER.get(vuln.severity, 1) * 0.15
-                    return 0.5 + sev_bonus, f"Correctly identified: {vuln.title}"
+                    score = 0.5 + sev_bonus
+                    # Evidence bonus: reward findings backed by prior investigation
+                    resource = vuln.resource_name.lower()
+                    investigated = any(
+                        resource in h.get("command", "").lower()
+                        for h in history
+                        if not h["command"].startswith(("finding:", "remediate:"))
+                    )
+                    if investigated:
+                        score += 0.3
+                        return score, f"Correctly identified: {vuln.title} (evidence-backed)"
+                    return score, f"Correctly identified: {vuln.title}"
             return 0.1, "Finding submitted but doesn't match known vulnerabilities."
 
         # Remediation submission — heuristic scoring for common patterns

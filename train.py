@@ -93,11 +93,14 @@ You can run kubectl commands to investigate. After finding a vulnerability, subm
 - remediate: kubectl <the fix command>
 
 WORKFLOW:
-1. kubectl get pods -A                              (find workloads)
-2. kubectl get clusterroles                         (check RBAC)
-3. kubectl get networkpolicies -A                   (check network isolation)
-4. kubectl describe pod <pod> -n <ns>               (inspect security context, env vars)
-5. Report findings and apply remediations.
+1. INVESTIGATE first — run kubectl get/describe to discover resources
+2. REPORT findings referencing specific pod/role/service names you inspected
+3. REMEDIATE each finding with kubectl delete/scale commands
+4. Move to the next vulnerability domain
+
+You MUST investigate (kubectl get/describe) before reporting findings.
+Findings without prior investigation receive reduced rewards.
+Remediations after correct findings earn bonus rewards.
 
 SECURITY CHECKS:
   RBAC: wildcard roles (* verbs/resources), privilege escalation verbs (escalate/bind/impersonate),
@@ -157,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--vllm-server-url", default="http://localhost:8000", help="vLLM server URL (server mode)")
     parser.add_argument("--vllm-server-timeout", type=float, default=60.0, help="Seconds to wait for vLLM server")
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (higher = more exploration)")
     parser.add_argument("--logging-steps", type=int, default=1)
     return parser.parse_args()
 

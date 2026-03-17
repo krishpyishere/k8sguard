@@ -60,8 +60,10 @@ class K8sGuardEnvironment(Environment):
             self.injector = VulnerabilityInjector(self.backend.v1, self.backend.apps_v1)
 
             self._training_namespace = os.environ.get("TRAINING_NAMESPACE", "k8sguard-training")
+            self._episode_count = 0
+            self._curriculum_enabled = os.environ.get("CURRICULUM", "1") == "1"
 
-            logger.info(f"K8sGuardEnvironment initialized (mode={self.mode})")
+            logger.info(f"K8sGuardEnvironment initialized (mode={self.mode}, curriculum={self._curriculum_enabled})")
         except Exception as e:
             logger.error(f"FATAL: K8sGuardEnvironment.__init__ failed: {e}", exc_info=True)
             raise
@@ -78,13 +80,17 @@ class K8sGuardEnvironment(Environment):
         self._step_count = 0
         self.history = []
         self.found_findings = []
+        self._episode_count += 1
 
         if self.mode == "training":
             # Clean up previous training resources (cleanup polls until empty)
             self.injector.cleanup(self._training_namespace)
 
-            # Generate and inject a vulnerability scenario
-            difficulty = float(os.environ.get("DIFFICULTY", "0.3"))
+            # Curriculum: ramp difficulty from 0.15 to 0.9 over episodes
+            if self._curriculum_enabled:
+                difficulty = min(0.15 + self._episode_count * 0.002, 0.9)
+            else:
+                difficulty = float(os.environ.get("DIFFICULTY", "0.3"))
             category = os.environ.get("SCAN_CATEGORY", None)
             self.scenario = self.generator.generate(difficulty, category)
 
@@ -194,6 +200,16 @@ class K8sGuardEnvironment(Environment):
         else:
             reward, feedback = 0.1, "Action executed."
 
+        # Investigation gate: penalize findings submitted before investigation
+        if is_finding and reward > 0 and self.scenario:
+            investigation_count = sum(
+                1 for h in self.history
+                if not h["command"].startswith(("finding:", "remediate:"))
+            )
+            if investigation_count < 2:
+                reward *= 0.3
+                feedback += " (reduced: investigate before reporting findings)"
+
         logger.info(f"    -> reward={reward:.2f} | {feedback[:80]}")
 
         done = False
@@ -211,8 +227,16 @@ class K8sGuardEnvironment(Environment):
             )
             if is_complete:
                 done = True
-                reward += 2.0
+                # Remediation bonus: +2.0 base + 1.0 per successful remediation (max +4.0)
+                remediation_count = sum(
+                    1 for h in self.history
+                    if h["command"].startswith("remediate:") and h.get("reward", 0) > 0
+                )
+                completion_bonus = 2.0 + min(remediation_count * 1.0, 2.0)
+                reward += completion_bonus
                 feedback = f"Scan complete! {reason}"
+                if remediation_count > 0:
+                    feedback += f" ({remediation_count} successful remediation(s), bonus +{completion_bonus:.1f})"
 
         self.history.append({
             "step": self._step_count,
