@@ -116,6 +116,7 @@ class SecurityJudge:
             "get netpol", "get sa", "get serviceaccounts", "get configmaps", "get cm",
             "describe pod", "describe deployment", "describe role", "describe clusterrole",
             "describe sa", "describe secret", "describe netpol", "describe networkpolicy",
+            "describe rolebinding", "describe clusterrolebinding",
             "auth can-i", "get events",
         )
         if any(p in cmd_lower for p in _SCAN_COMMANDS):

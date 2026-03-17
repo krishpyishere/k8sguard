@@ -514,6 +514,78 @@ class CommandHandler:
                 lines.append("    Environment:")
                 for e in c.env:
                     lines.append(_format_env_var(e))
+            sc = c.security_context
+            if sc:
+                lines.append("    Security Context:")
+                if sc.privileged is not None:
+                    lines.append(f"      Privileged:               {sc.privileged}")
+                if sc.run_as_user is not None:
+                    lines.append(f"      Run As User:              {sc.run_as_user}")
+                if sc.run_as_non_root is not None:
+                    lines.append(f"      Run As Non-Root:          {sc.run_as_non_root}")
+                if sc.read_only_root_filesystem is not None:
+                    lines.append(f"      Read Only Root FS:        {sc.read_only_root_filesystem}")
+                if sc.allow_privilege_escalation is not None:
+                    lines.append(f"      Allow Privilege Escalation: {sc.allow_privilege_escalation}")
+                if sc.capabilities:
+                    if sc.capabilities.add:
+                        lines.append(f"      Capabilities (add):       {sc.capabilities.add}")
+                    if sc.capabilities.drop:
+                        lines.append(f"      Capabilities (drop):      {sc.capabilities.drop}")
+
+        pod_spec = pod.spec
+
+        # Pod-level security
+        if pod_spec.host_pid:
+            lines.append(f"Host PID:     {pod_spec.host_pid}")
+        if pod_spec.host_network:
+            lines.append(f"Host Network: {pod_spec.host_network}")
+        if getattr(pod_spec, 'host_ipc', False):
+            lines.append(f"Host IPC:     {pod_spec.host_ipc}")
+
+        # Volumes
+        if pod_spec.volumes:
+            lines.append("Volumes:")
+            for vol in pod_spec.volumes:
+                lines.append(f"  {vol.name}:")
+                if vol.host_path:
+                    lines.append(f"    Type:       HostPath (bare host directory)")
+                    lines.append(f"    Path:       {vol.host_path.path}")
+                    if vol.host_path.type:
+                        lines.append(f"    HostPathType: {vol.host_path.type}")
+                elif vol.secret:
+                    lines.append(f"    Type:       Secret (a volume populated by a Secret)")
+                    lines.append(f"    SecretName: {vol.secret.secret_name}")
+                elif vol.config_map:
+                    lines.append(f"    Type:       ConfigMap")
+                    lines.append(f"    Name:       {vol.config_map.name}")
+                elif vol.empty_dir is not None:
+                    lines.append(f"    Type:       EmptyDir")
+                else:
+                    lines.append(f"    Type:       <other>")
+
+        # Tolerations
+        if pod_spec.tolerations:
+            lines.append("Tolerations:")
+            for t in pod_spec.tolerations:
+                val = f"={t.value}" if t.value else ""
+                effect = f":{t.effect}" if t.effect else ""
+                op = t.operator or "Equal"
+                lines.append(f"  {t.key or '<any>'}{val}{effect} op={op}")
+
+        # Node Affinity
+        if pod_spec.affinity and pod_spec.affinity.node_affinity:
+            lines.append("Node Affinity:")
+            na = pod_spec.affinity.node_affinity
+            if na.required_during_scheduling_ignored_during_execution:
+                for term in na.required_during_scheduling_ignored_during_execution.node_selector_terms:
+                    for expr in (term.match_expressions or []):
+                        lines.append(f"  {expr.key} {expr.operator} {expr.values}")
+
+        # Service Account
+        lines.append(f"Service Account:  {pod_spec.service_account_name or 'default'}")
+        if pod_spec.automount_service_account_token is not None:
+            lines.append(f"Automount Token:  {pod_spec.automount_service_account_token}")
 
         events = self.v1.list_namespaced_event(
             namespace, field_selector=f"involvedObject.name={pod.metadata.name}")

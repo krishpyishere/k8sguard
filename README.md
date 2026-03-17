@@ -212,6 +212,9 @@ The agent learns to detect vulnerabilities across five domains:
 ### RBAC & Identity
 - Wildcard ClusterRoles/Roles (`*` verbs or resources)
 - Privilege escalation verbs (`escalate`, `bind`, `impersonate`)
+- Privilege escalation RBAC verbs (`escalate`, `bind`)
+- Cluster-admin ClusterRoleBinding (ServiceAccount bound to `cluster-admin`)
+- Wildcard namespaced Roles (Role with `resources: ["*"]`)
 - Broad secrets access via ClusterRoles
 - Default service account token auto-mounting
 
@@ -224,14 +227,19 @@ The agent learns to detect vulnerabilities across five domains:
 - Namespaces with no NetworkPolicy (unrestricted lateral movement)
 - Missing egress policies (unrestricted outbound traffic)
 - Services exposed via NodePort/LoadBalancer
+- Unauthenticated database services (Redis/Postgres/MySQL exposed with no NetworkPolicy)
 
 ### Container Runtime
 - Privileged containers (`privileged: true`)
 - Host PID/Network namespace sharing
+- Container runtime socket mounts (containerd.sock, docker.sock — container escape)
+- Host IPC namespace sharing (`hostIPC: true`)
 - HostPath volume mounts (container escape vector)
 - Containers running as root (UID 0)
 - Writable root filesystems
 - Dangerous Linux capabilities (`SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE`, `ALL`)
+- Privilege escalation allowed (`allowPrivilegeEscalation: true`)
+- Control-plane node targeting (tolerations for master/control-plane taints)
 - Missing security contexts
 
 ### Supply Chain
@@ -245,10 +253,11 @@ Vulnerabilities are injected into an isolated namespace (`k8sguard-training`) wi
 
 | Tier | Difficulty | Example |
 |------|-----------|---------|
-| 1 | 0.1 - 0.3 | Single privileged container, root UID pod, `:latest` image |
-| 2 | 0.3 - 0.5 | Wildcard RBAC, secrets in env vars, missing network policies, dangerous capabilities |
-| 3 | 0.5 - 0.7 | Multiple vulns: privileged pod + exposed service + no network policy |
-| 4 | 0.7+ | Full spectrum: hostPath mounts + wildcard RBAC + secrets exposure + host namespaces |
+| 0 | 0.15 | Remediation drills: delete privileged pod, delete runtime socket mount, delete exposed service |
+| 1 | 0.2 - 0.3 | Single vuln: privileged container, root UID, `:latest` image, hardcoded credentials, writable root FS |
+| 2 | 0.3 - 0.5 | Investigation: wildcard RBAC, secrets in env, missing network policies, hostIPC, cluster-admin binding |
+| 3 | 0.5 - 0.7 | Multi-vuln combos: container escape combo, service exposure combo, credential exposure combo |
+| 4 | 0.7+ | Full spectrum: system-monitor full (6 vulns), cluster takeover (5 vulns) |
 
 ### Reward Signal
 
@@ -282,7 +291,7 @@ K8sGuard/
     ├── k8s_commands.py               # kubectl command handler (get/describe/logs/auth can-i/...)
     ├── llm_client.py                 # LLM client (OpenAI-compatible, Anthropic, HuggingFace)
     ├── scanners.py                   # Programmatic scanners (RBAC, secrets, network, runtime, supply chain)
-    ├── vulnerability_injectors.py    # 12 injectors for training scenarios
+    ├── vulnerability_injectors.py    # 24 injectors for training scenarios
     ├── scenario_generator.py         # Tiered scenario templates (single vuln → full spectrum)
     ├── judge.py                      # Heuristic + LLM scoring of agent actions
     └── k8sguard_environment.py       # OpenEnv Environment (reset/step loop, scan + training modes)
@@ -298,7 +307,7 @@ K8sGuard/
 
 **`scanners.py`** — Five category scanners that programmatically inspect cluster resources and return `SecurityFinding` objects. Can be used standalone to audit a cluster or to validate agent discoveries.
 
-**`vulnerability_injectors.py`** — 12 injection types that create real misconfigurations matching the security curriculum above.
+**`vulnerability_injectors.py`** — 24 injection types that create real misconfigurations matching the security curriculum above.
 
 **`llm_client.py`** — Unified LLM client for the judge (OpenAI-compatible/vLLM, Anthropic, or HuggingFace).
 
@@ -321,6 +330,10 @@ All configuration is via environment variables:
 | `SCAN_CATEGORY` | all | Focus: `rbac`, `secrets`, `network`, `runtime`, `supply_chain` |
 | `MAX_STEPS` | `25` | Max agent actions per episode |
 | `SCAN_LOG` | `scan_transcripts.jsonl` | Path for episode transcripts |
+
+## Acknowledgments
+
+Training scenarios inspired by [Kubernetes Goat](https://github.com/madhuakula/kubernetes-goat) by Madhu Akula — an intentionally vulnerable Kubernetes cluster environment for security training.
 
 ## License
 

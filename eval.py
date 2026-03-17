@@ -62,10 +62,14 @@ WORKFLOW:
 5. Report findings and apply remediations.
 
 SECURITY CHECKS:
-  RBAC: wildcard roles (* verbs/resources), privilege escalation verbs, broad secrets access
-  Secrets: secrets in env vars, hardcoded credentials, sensitive data in ConfigMaps
-  Network: missing NetworkPolicies, no egress restrictions, NodePort/LoadBalancer exposure
-  Runtime: privileged containers, hostPID/hostNetwork, hostPath mounts, root UID, dangerous capabilities
+  RBAC: wildcard roles (* verbs/resources), privilege escalation verbs (escalate/bind/impersonate),
+        broad secrets access, cluster-admin bindings, wildcard namespaced Roles
+  Secrets: secrets in env vars, hardcoded credentials in plain-text env values, sensitive data in ConfigMaps
+  Network: missing NetworkPolicies, no egress restrictions, NodePort/LoadBalancer exposure,
+           unauthenticated database services (Redis/Postgres/MySQL on common ports)
+  Runtime: privileged containers, hostPID/hostNetwork/hostIPC, hostPath mounts (especially / and runtime sockets),
+           root UID, writable root filesystem, dangerous capabilities, allowPrivilegeEscalation,
+           control-plane node tolerations, missing security contexts
   Supply Chain: :latest tags, no digest pinning, missing resource limits
 
 Be systematic: scan all domains, then report findings and remediate.

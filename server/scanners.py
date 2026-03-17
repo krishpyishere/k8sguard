@@ -123,6 +123,32 @@ def scan_rbac(namespaces: list[str]) -> list[SecurityFinding]:
     except ApiException as e:
         logger.warning(f"RBAC scan error (ClusterRoles): {e.reason}")
 
+    # Check ClusterRoleBindings for cluster-admin grants
+    try:
+        crbs = rbac_v1.list_cluster_role_binding()
+        for crb in crbs.items:
+            if crb.metadata.name.startswith("system:"):
+                continue
+            if crb.role_ref.name == "cluster-admin":
+                subject_desc = ", ".join(
+                    f"{s.kind}/{s.name}" + (f" in {s.namespace}" if s.namespace else "")
+                    for s in (crb.subjects or [])
+                )
+                for subj in (crb.subjects or []):
+                    if subj.namespace in namespaces or not subj.namespace:
+                        findings.append(_finding(
+                            idx, "rbac", SEVERITY_CRITICAL,
+                            "Cluster-admin binding",
+                            f"ClusterRoleBinding '{crb.metadata.name}' grants cluster-admin to {subject_desc}",
+                            subj.namespace or "*", "ClusterRoleBinding", crb.metadata.name,
+                            f"roleRef=cluster-admin, subjects=[{subject_desc}]",
+                            f"Remove or restrict the ClusterRoleBinding '{crb.metadata.name}'",
+                        ))
+                        idx += 1
+                        break
+    except ApiException as e:
+        logger.warning(f"RBAC scan error (ClusterRoleBindings): {e.reason}")
+
     # Check namespaced Roles
     for ns in namespaces:
         try:
@@ -218,11 +244,15 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
     idx = 0
     net_v1 = client.NetworkingV1Api()
 
+    _DB_PORTS = {6379, 5432, 3306, 27017, 9200, 11211}
+
     for ns in namespaces:
         # Check for missing network policies
+        policies_list = []
         try:
             policies = net_v1.list_namespaced_network_policy(ns)
-            if not policies.items:
+            policies_list = policies.items or []
+            if not policies_list:
                 findings.append(_finding(
                     idx, "network", SEVERITY_HIGH,
                     "No NetworkPolicy in namespace",
@@ -235,7 +265,7 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
             else:
                 has_egress = any(
                     p.spec.policy_types and "Egress" in p.spec.policy_types
-                    for p in policies.items
+                    for p in policies_list
                 )
                 if not has_egress:
                     findings.append(_finding(
@@ -243,7 +273,7 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
                         "No egress restrictions",
                         f"Namespace '{ns}' has ingress policies but no egress restrictions",
                         ns, "Namespace", ns,
-                        f"{len(policies.items)} policies, none with Egress type",
+                        f"{len(policies_list)} policies, none with Egress type",
                         f"Add a default-deny egress NetworkPolicy in namespace '{ns}'",
                     ))
                     idx += 1
@@ -265,6 +295,21 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
                         f"Use ClusterIP with an Ingress controller, or restrict source IPs via loadBalancerSourceRanges",
                     ))
                     idx += 1
+
+                # Check for unauthenticated database services
+                for p in (svc.spec.ports or []):
+                    target = p.target_port if isinstance(p.target_port, int) else p.port
+                    if p.port in _DB_PORTS or target in _DB_PORTS:
+                        if not policies_list:  # reuse the policies fetched earlier
+                            findings.append(_finding(
+                                idx, "network", SEVERITY_HIGH,
+                                "Unauthenticated database service",
+                                f"Service '{svc.metadata.name}' exposes port {p.port} (common DB port) with no NetworkPolicy",
+                                ns, "Service", svc.metadata.name,
+                                f"port={p.port}, no NetworkPolicy",
+                                f"Add a NetworkPolicy to restrict access to '{svc.metadata.name}' and require authentication",
+                            ))
+                            idx += 1
         except ApiException:
             pass
 
@@ -310,6 +355,16 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                 ))
                 idx += 1
 
+            if getattr(pod_spec, 'host_ipc', False):
+                findings.append(_finding(
+                    idx, "runtime", SEVERITY_CRITICAL,
+                    "Host IPC namespace shared",
+                    f"Pod '{pod_name}' shares host IPC namespace",
+                    ns, "Pod", pod_name, "hostIPC: true",
+                    "Set hostIPC: false — host IPC sharing allows inter-process communication with host processes",
+                ))
+                idx += 1
+
             # HostPath volume mounts
             for vol in (pod_spec.volumes or []):
                 if vol.host_path:
@@ -322,6 +377,33 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                         "Use PersistentVolumeClaims instead of hostPath mounts",
                     ))
                     idx += 1
+
+                    # After the existing hostPath finding, check for runtime socket specifically
+                    if any(sock in vol.host_path.path for sock in ("containerd.sock", "docker.sock", "crio.sock")):
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_CRITICAL,
+                            "Container runtime socket mounted",
+                            f"Pod '{pod_name}' mounts container runtime socket '{vol.host_path.path}' — enables container escape",
+                            ns, "Pod", pod_name,
+                            f"hostPath: {vol.host_path.path} (runtime socket)",
+                            "Remove the runtime socket mount — this allows full container escape and host takeover",
+                        ))
+                        idx += 1
+
+            # Control-plane tolerations check
+            _CP_TAINT_KEYS = {"node-role.kubernetes.io/control-plane", "node-role.kubernetes.io/master"}
+            for tol in (pod_spec.tolerations or []):
+                if tol.key in _CP_TAINT_KEYS:
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_HIGH,
+                        "Control-plane node targeting",
+                        f"Pod '{pod_name}' has toleration for '{tol.key}' — can schedule on control-plane nodes",
+                        ns, "Pod", pod_name,
+                        f"toleration: key={tol.key}, operator={tol.operator}, effect={tol.effect}",
+                        "Remove control-plane tolerations unless this pod truly needs to run on master nodes",
+                    ))
+                    idx += 1
+                    break  # one finding per pod
 
             # Container-level checks
             for container in pod_spec.containers:
@@ -386,6 +468,17 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                             f"Remove dangerous capabilities: {dangerous}. Drop ALL and add only what's needed.",
                         ))
                         idx += 1
+
+                if sc.allow_privilege_escalation is True:
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_HIGH,
+                        "Privilege escalation allowed",
+                        f"Container '{container.name}' in pod '{pod_name}' allows privilege escalation",
+                        ns, "Pod", pod_name,
+                        "allowPrivilegeEscalation: true",
+                        "Set allowPrivilegeEscalation: false to prevent child processes from gaining more privileges",
+                    ))
+                    idx += 1
 
             # Default service account check
             sa_name = pod_spec.service_account_name or "default"

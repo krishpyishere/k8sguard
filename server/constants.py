@@ -171,6 +171,55 @@ SCAN_CATEGORIES = {
         "title": "Missing imagePullPolicy",
         "description": "No explicit imagePullPolicy — may use cached (stale) images",
     },
+    # Kubernetes Goat — additional vulnerability types
+    "host_ipc": {
+        "category": "runtime",
+        "severity": SEVERITY_CRITICAL,
+        "title": "Host IPC namespace shared",
+        "description": "Pod shares host IPC namespace — can communicate with host processes via shared memory",
+    },
+    "allow_privilege_escalation": {
+        "category": "runtime",
+        "severity": SEVERITY_HIGH,
+        "title": "Privilege escalation allowed",
+        "description": "Container allows privilege escalation via setuid/setgid binaries",
+    },
+    "container_socket_mount": {
+        "category": "runtime",
+        "severity": SEVERITY_CRITICAL,
+        "title": "Container runtime socket mounted",
+        "description": "Pod mounts containerd/docker socket — enables full container escape",
+    },
+    "unauthed_db_service": {
+        "category": "network",
+        "severity": SEVERITY_HIGH,
+        "title": "Unauthenticated database service",
+        "description": "Service exposes a common DB port with no NetworkPolicy protection",
+    },
+    "cluster_admin_binding": {
+        "category": "rbac",
+        "severity": SEVERITY_CRITICAL,
+        "title": "Cluster-admin binding",
+        "description": "ServiceAccount or user bound to cluster-admin ClusterRole",
+    },
+    "control_plane_toleration": {
+        "category": "runtime",
+        "severity": SEVERITY_HIGH,
+        "title": "Control-plane node targeting",
+        "description": "Pod tolerates control-plane taints and can schedule on master nodes",
+    },
+    "hardcoded_creds": {
+        "category": "secrets",
+        "severity": SEVERITY_HIGH,
+        "title": "Hardcoded sensitive value in env",
+        "description": "Container has plain-text passwords or API keys directly in env.value",
+    },
+    "host_path_root": {
+        "category": "runtime",
+        "severity": SEVERITY_CRITICAL,
+        "title": "HostPath volume mount",
+        "description": "Pod mounts the entire host root filesystem (/) — full host read/write access",
+    },
 }
 
 # ---- Timeouts ----
