@@ -22,6 +22,21 @@ logger = logging.getLogger(__name__)
 _MAX_PROMPT_CHARS = 4000
 _MAX_HISTORY_ENTRIES = 6
 _MAX_OUTPUT_CHARS = 200
+_STOP_WORDS = {"a", "an", "the", "in", "is", "of", "to", "for", "on", "with", "not", "no", "and", "or", "has", "are", "was", "be"}
+
+
+def _keyword_overlap(title: str, text: str) -> int:
+    """Count significant keyword overlaps between vulnerability title and finding text."""
+    title_words = {w for w in title.lower().split() if w not in _STOP_WORDS and len(w) > 2}
+    text_words = {w for w in text.lower().split() if w not in _STOP_WORDS and len(w) > 2}
+    # Also check for partial matches (e.g. "privileged" matches "privilege")
+    count = 0
+    for tw in title_words:
+        if tw in text_words:
+            count += 1
+        elif any(tw[:4] in xw or xw[:4] in tw for xw in text_words if len(xw) > 3):
+            count += 1
+    return count
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -87,10 +102,16 @@ class SecurityJudge:
         # Finding submission
         if cmd_lower.startswith("finding:"):
             finding_text = command[8:].strip().lower()
+            best_match = None
+            best_score = 0
             for vuln in scenario.injected_findings:
-                if (vuln.title.lower() in finding_text
-                        or vuln.category in finding_text
-                        or vuln.resource_name in finding_text):
+                # Exact substring match (original)
+                exact = (vuln.title.lower() in finding_text
+                         or vuln.category in finding_text
+                         or vuln.resource_name.lower() in finding_text)
+                # Fuzzy keyword overlap match
+                keyword_hits = _keyword_overlap(vuln.title, finding_text)
+                if exact or keyword_hits >= 2:
                     sev_bonus = SEVERITY_ORDER.get(vuln.severity, 1) * 0.15
                     score = 0.5 + sev_bonus
                     # Evidence bonus: reward findings backed by prior investigation
@@ -102,8 +123,12 @@ class SecurityJudge:
                     )
                     if investigated:
                         score += 0.3
-                        return score, f"Correctly identified: {vuln.title} (evidence-backed)"
-                    return score, f"Correctly identified: {vuln.title}"
+                    if score > best_score:
+                        best_match = vuln
+                        best_score = score
+            if best_match:
+                suffix = " (evidence-backed)" if best_score > 0.5 + SEVERITY_ORDER.get(best_match.severity, 1) * 0.15 else ""
+                return best_score, f"Correctly identified: {best_match.title}{suffix}"
             return 0.1, "Finding submitted but doesn't match known vulnerabilities."
 
         # Remediation submission — heuristic scoring for common patterns
