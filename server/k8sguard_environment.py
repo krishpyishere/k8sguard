@@ -200,15 +200,15 @@ class K8sGuardEnvironment(Environment):
         else:
             reward, feedback = 0.1, "Action executed."
 
-        # Investigation gate: penalize findings submitted before investigation
-        if is_finding and reward > 0 and self.scenario:
-            investigation_count = sum(
-                1 for h in self.history
-                if not h["command"].startswith(("finding:", "remediate:"))
-            )
-            if investigation_count < 2:
-                reward *= 0.3
-                feedback += " (reduced: investigate before reporting findings)"
+        # Investigation gate: block scan completion and heavily penalize findings before investigation
+        _investigation_count = sum(
+            1 for h in self.history
+            if not h["command"].startswith(("finding:", "remediate:"))
+        )
+        _insufficient_investigation = is_finding and self.scenario and _investigation_count < 2
+        if _insufficient_investigation and reward > 0:
+            reward = 0.1  # flat minimal reward, no severity bonus
+            feedback += " (reduced: investigate before reporting findings)"
 
         logger.info(f"    -> reward={reward:.2f} | {feedback[:80]}")
 
@@ -221,7 +221,7 @@ class K8sGuardEnvironment(Environment):
             reward -= raw_sum + 1.0  # net total = -1.0 for timeout
             feedback = "Scan timeout — not all vulnerabilities found."
 
-        elif is_finding and self.scenario:
+        elif is_finding and self.scenario and not _insufficient_investigation:
             is_complete, reason = self.judge.verify_scan_complete(
                 self.scenario, self.found_findings, self.history
             )
