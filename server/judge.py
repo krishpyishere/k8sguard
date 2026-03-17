@@ -95,9 +95,19 @@ class SecurityJudge:
                     return 0.5 + sev_bonus, f"Correctly identified: {vuln.title}"
             return 0.1, "Finding submitted but doesn't match known vulnerabilities."
 
-        # Remediation submission
+        # Remediation submission — heuristic scoring for common patterns
         if cmd_lower.startswith("remediate:"):
-            return None, ""  # defer to LLM for remediation quality
+            remediation_text = command[10:].strip().lower()
+            for vuln in scenario.injected_findings:
+                resource = vuln.resource_name.lower()
+                if resource in remediation_text:
+                    # Exact delete command targeting a known-vulnerable resource
+                    if "kubectl delete" in remediation_text:
+                        return 0.5, f"Correct remediation: deleting {vuln.resource_kind}/{vuln.resource_name}"
+                    # Targets the right resource but uses a complex action (patch, etc.)
+                    return 0.3, f"Correct remediation target: {vuln.resource_kind}/{vuln.resource_name}"
+            # No resource match — defer complex remediations to LLM
+            return None, ""
 
         # Valid investigation commands
         _SCAN_COMMANDS = (

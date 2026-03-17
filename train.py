@@ -108,6 +108,7 @@ SECURITY CHECKS:
 
 Be systematic: scan all domains, then report findings and remediate.
 Be efficient: minimize unnecessary commands.
+After finding a vulnerability, always attempt a remediation before moving to the next one.
 Output one command per line. No explanations, just commands."""
 
 
@@ -120,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", default="Qwen/Qwen3-8B", help="Agent model to fine-tune")
     parser.add_argument("--env-url", default="http://localhost:8000", help="OpenEnv server URL")
     parser.add_argument("--dataset-size", type=int, default=50, help="Number of training episodes")
-    parser.add_argument("--max-turns", type=int, default=15, help="Max commands per episode")
+    parser.add_argument("--max-turns", type=int, default=25, help="Max commands per episode")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Max tokens per agent response")
     parser.add_argument("--num-generations", type=int, default=4, help="G for GRPO")
     parser.add_argument("--learning-rate", type=float, default=5e-6)
@@ -137,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--vllm-server-url", default="http://localhost:8000", help="vLLM server URL (server mode)")
     parser.add_argument("--vllm-server-timeout", type=float, default=60.0, help="Seconds to wait for vLLM server")
-    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--logging-steps", type=int, default=1)
     return parser.parse_args()
 
