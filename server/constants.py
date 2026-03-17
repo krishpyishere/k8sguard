@@ -220,6 +220,129 @@ SCAN_CATEGORIES = {
         "title": "HostPath volume mount",
         "description": "Pod mounts the entire host root filesystem (/) — full host read/write access",
     },
+    # KICS-derived checks — Runtime/Container
+    "no_drop_caps": {
+        "category": "runtime",
+        "severity": SEVERITY_LOW,
+        "title": "Container does not drop all capabilities",
+        "description": "Container does not drop ALL capabilities — unnecessary privileges retained",
+    },
+    "net_raw_not_dropped": {
+        "category": "runtime",
+        "severity": SEVERITY_MEDIUM,
+        "title": "NET_RAW capability not dropped",
+        "description": "Container does not drop NET_RAW — allows ARP/packet spoofing attacks",
+    },
+    "no_seccomp_profile": {
+        "category": "runtime",
+        "severity": SEVERITY_MEDIUM,
+        "title": "No seccomp profile configured",
+        "description": "Container has no seccomp profile — all syscalls are permitted",
+    },
+    "no_apparmor_profile": {
+        "category": "runtime",
+        "severity": SEVERITY_LOW,
+        "title": "No AppArmor profile configured",
+        "description": "Container has no AppArmor profile annotation — no MAC enforcement",
+    },
+    "no_liveness_probe": {
+        "category": "runtime",
+        "severity": SEVERITY_LOW,
+        "title": "No liveness probe configured",
+        "description": "Container has no liveness probe — unresponsive containers will not be restarted",
+    },
+    "no_readiness_probe": {
+        "category": "runtime",
+        "severity": SEVERITY_MEDIUM,
+        "title": "No readiness probe configured",
+        "description": "Container has no readiness probe — traffic may be routed to unready containers",
+    },
+    "unmasked_proc_mount": {
+        "category": "runtime",
+        "severity": SEVERITY_HIGH,
+        "title": "Container runs with unmasked /proc",
+        "description": "Container has procMount: Unmasked — can read sensitive kernel parameters",
+    },
+    "writable_os_dir_mount": {
+        "category": "runtime",
+        "severity": SEVERITY_HIGH,
+        "title": "Writable mount on sensitive OS directory",
+        "description": "Container has writable volume mount on /etc, /var, /usr, or other sensitive OS paths",
+    },
+    "unsafe_sysctls": {
+        "category": "runtime",
+        "severity": SEVERITY_HIGH,
+        "title": "Pod uses unsafe sysctl",
+        "description": "Pod sets unsafe kernel sysctls that can affect other pods on the node",
+    },
+    "image_pull_not_always": {
+        "category": "runtime",
+        "severity": SEVERITY_LOW,
+        "title": "Image pull policy not set to Always",
+        "description": "Container imagePullPolicy is not Always — may use stale cached images",
+    },
+    "ingress_exposes_workload": {
+        "category": "network",
+        "severity": SEVERITY_MEDIUM,
+        "title": "Ingress exposes workload externally",
+        "description": "Ingress resource routes external traffic to internal service",
+    },
+    "dashboard_enabled": {
+        "category": "runtime",
+        "severity": SEVERITY_LOW,
+        "title": "Kubernetes Dashboard is deployed",
+        "description": "Kubernetes Dashboard is running — common attack vector for cluster compromise",
+    },
+    # KICS-derived checks — RBAC/Identity
+    "rbac_exec_permission": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "RBAC grants exec permission on pods",
+        "description": "ClusterRole grants pods/exec access — allows kubectl exec shell access to containers",
+    },
+    "rbac_port_forward": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "RBAC grants port-forward permission",
+        "description": "ClusterRole grants pods/portforward access — bypasses network security restrictions",
+    },
+    "rbac_create_pods": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "RBAC grants create permission on pods",
+        "description": "ClusterRole grants create verb on pods — privilege escalation vector",
+    },
+    "role_binding_default_sa": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "Role bound to default service account",
+        "description": "RoleBinding or ClusterRoleBinding grants permissions to the default ServiceAccount",
+    },
+    "shared_service_account": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "Shared service account",
+        "description": "Multiple pods share the same non-default ServiceAccount token",
+    },
+    "sa_name_undefined": {
+        "category": "rbac",
+        "severity": SEVERITY_MEDIUM,
+        "title": "Service account name undefined",
+        "description": "Pod uses default/undefined serviceAccountName — implicit broad access",
+    },
+    # KICS-derived checks — Network
+    "default_namespace_used": {
+        "category": "network",
+        "severity": SEVERITY_MEDIUM,
+        "title": "Workload in default namespace",
+        "description": "Workload deployed in the 'default' namespace — no isolation, bad practice",
+    },
+    "network_policy_no_target": {
+        "category": "network",
+        "severity": SEVERITY_LOW,
+        "title": "NetworkPolicy not targeting any pod",
+        "description": "NetworkPolicy podSelector matches zero pods — policy is ineffective",
+    },
 }
 
 # ---- Timeouts ----

@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 _DANGEROUS_CAPS = {"SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "ALL", "NET_RAW", "DAC_OVERRIDE"}
 _SENSITIVE_KEYS = {"password", "passwd", "secret", "token", "api_key", "apikey", "private_key", "access_key"}
+_SENSITIVE_OS_DIRS = {"/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/boot"}
+_SAFE_SYSCTLS = {
+    "kernel.shm_rmid_forced",
+    "net.ipv4.ip_local_port_range",
+    "net.ipv4.tcp_syncookies",
+    "net.ipv4.ping_group_range",
+    "net.ipv4.ip_unprivileged_port_start",
+}
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -39,6 +47,8 @@ def scan_all(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: list[s
     findings.extend(scan_network(v1, namespaces))
     findings.extend(scan_runtime(v1, apps_v1, namespaces))
     findings.extend(scan_supply_chain(v1, apps_v1, namespaces))
+    findings.extend(scan_ingress(namespaces))
+    findings.extend(scan_dashboard(apps_v1, namespaces))
     return findings
 
 
@@ -120,10 +130,48 @@ def scan_rbac(namespaces: list[str]) -> list[SecurityFinding]:
                         f"Limit secrets access to specific namespaces using Roles instead of ClusterRoles",
                     ))
                     idx += 1
+
+                # KICS: pods/exec permission
+                if "pods/exec" in resources and any(v in verbs for v in ("get", "create", "*")):
+                    findings.append(_finding(
+                        idx, "rbac", SEVERITY_MEDIUM,
+                        "RBAC grants exec permission on pods",
+                        f"ClusterRole '{cr.metadata.name}' grants exec access to pods via pods/exec",
+                        "*", "ClusterRole", cr.metadata.name,
+                        f"verbs={verbs}, resources={resources}",
+                        f"Remove 'pods/exec' from ClusterRole '{cr.metadata.name}' resources",
+                    ))
+                    idx += 1
+
+                # KICS: pods/portforward permission
+                if "pods/portforward" in resources and any(v in verbs for v in ("get", "create", "*")):
+                    findings.append(_finding(
+                        idx, "rbac", SEVERITY_MEDIUM,
+                        "RBAC grants port-forward permission",
+                        f"ClusterRole '{cr.metadata.name}' grants port-forward access via pods/portforward",
+                        "*", "ClusterRole", cr.metadata.name,
+                        f"verbs={verbs}, resources={resources}",
+                        f"Remove 'pods/portforward' from ClusterRole '{cr.metadata.name}' resources",
+                    ))
+                    idx += 1
+
+                # KICS: permissive create-pods permission
+                if ("pods" in resources or "*" in resources) and any(v in verbs for v in ("create", "*")):
+                    if "" in api_groups or "*" in api_groups:
+                        findings.append(_finding(
+                            idx, "rbac", SEVERITY_MEDIUM,
+                            "RBAC grants create permission on pods",
+                            f"ClusterRole '{cr.metadata.name}' can create pods — privilege escalation vector",
+                            "*", "ClusterRole", cr.metadata.name,
+                            f"verbs={verbs}, resources={resources}, apiGroups={api_groups}",
+                            f"Remove 'create' verb on 'pods' from ClusterRole '{cr.metadata.name}'",
+                        ))
+                        idx += 1
+
     except ApiException as e:
         logger.warning(f"RBAC scan error (ClusterRoles): {e.reason}")
 
-    # Check ClusterRoleBindings for cluster-admin grants
+    # Check ClusterRoleBindings for cluster-admin grants and default SA bindings
     try:
         crbs = rbac_v1.list_cluster_role_binding()
         for crb in crbs.items:
@@ -143,6 +191,21 @@ def scan_rbac(namespaces: list[str]) -> list[SecurityFinding]:
                             subj.namespace or "*", "ClusterRoleBinding", crb.metadata.name,
                             f"roleRef=cluster-admin, subjects=[{subject_desc}]",
                             f"Remove or restrict the ClusterRoleBinding '{crb.metadata.name}'",
+                        ))
+                        idx += 1
+                        break
+
+            # KICS: ClusterRoleBinding to default SA
+            for subj in (crb.subjects or []):
+                if subj.kind == "ServiceAccount" and subj.name == "default":
+                    if subj.namespace in namespaces or not subj.namespace:
+                        findings.append(_finding(
+                            idx, "rbac", SEVERITY_MEDIUM,
+                            "ClusterRole bound to default service account",
+                            f"ClusterRoleBinding '{crb.metadata.name}' binds to default ServiceAccount",
+                            subj.namespace or "*", "ClusterRoleBinding", crb.metadata.name,
+                            f"roleRef={crb.role_ref.kind}/{crb.role_ref.name}, subject=ServiceAccount/default",
+                            f"Create a dedicated ServiceAccount instead of binding cluster roles to 'default'",
                         ))
                         idx += 1
                         break
@@ -167,6 +230,26 @@ def scan_rbac(namespaces: list[str]) -> list[SecurityFinding]:
                             f"Restrict Role '{role.metadata.name}' to specific verbs and resources",
                         ))
                         idx += 1
+        except ApiException:
+            pass
+
+    # KICS: RoleBindings to default SA
+    for ns in namespaces:
+        try:
+            role_bindings = rbac_v1.list_namespaced_role_binding(ns)
+            for rb in role_bindings.items:
+                for subj in (rb.subjects or []):
+                    if subj.kind == "ServiceAccount" and subj.name == "default":
+                        findings.append(_finding(
+                            idx, "rbac", SEVERITY_MEDIUM,
+                            "Role bound to default service account",
+                            f"RoleBinding '{rb.metadata.name}' in {ns} binds to default ServiceAccount",
+                            ns, "RoleBinding", rb.metadata.name,
+                            f"roleRef={rb.role_ref.kind}/{rb.role_ref.name}, subject=ServiceAccount/default",
+                            f"Create a dedicated ServiceAccount instead of binding roles to 'default'",
+                        ))
+                        idx += 1
+                        break
         except ApiException:
             pass
 
@@ -277,6 +360,34 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
                         f"Add a default-deny egress NetworkPolicy in namespace '{ns}'",
                     ))
                     idx += 1
+
+                # KICS: NetworkPolicy not targeting any pod
+                try:
+                    ns_pods = v1.list_namespaced_pod(ns)
+                    pod_labels_list = [p.metadata.labels or {} for p in ns_pods.items]
+                    for policy in policies_list:
+                        selector = policy.spec.pod_selector
+                        match_labels = (selector.match_labels or {}) if selector else {}
+                        if not match_labels:
+                            continue
+                        matched = any(
+                            all(pl.get(k) == v for k, v in match_labels.items())
+                            for pl in pod_labels_list
+                        )
+                        if not matched:
+                            findings.append(_finding(
+                                idx, "network", SEVERITY_LOW,
+                                "NetworkPolicy not targeting any pod",
+                                f"NetworkPolicy '{policy.metadata.name}' in namespace '{ns}' has podSelector "
+                                f"{match_labels} that matches no running pods — policy is ineffective",
+                                ns, "NetworkPolicy", policy.metadata.name,
+                                f"podSelector.matchLabels={match_labels}, matched_pods=0",
+                                f"Update the podSelector in NetworkPolicy '{policy.metadata.name}' to match "
+                                f"actual pod labels, or remove the unused policy",
+                            ))
+                            idx += 1
+                except ApiException:
+                    pass
         except ApiException:
             pass
 
@@ -313,6 +424,94 @@ def scan_network(v1: client.CoreV1Api, namespaces: list[str]) -> list[SecurityFi
         except ApiException:
             pass
 
+    # KICS: Workloads running in the "default" namespace
+    if "default" in namespaces:
+        try:
+            default_pods = v1.list_namespaced_pod("default")
+            for pod in default_pods.items:
+                if pod.metadata.labels and pod.metadata.labels.get("component"):
+                    continue
+                findings.append(_finding(
+                    idx, "network", SEVERITY_MEDIUM,
+                    "Workload in default namespace",
+                    f"Pod '{pod.metadata.name}' is running in the 'default' namespace — "
+                    f"workloads should use dedicated namespaces for isolation",
+                    "default", "Pod", pod.metadata.name,
+                    f"namespace=default, pod={pod.metadata.name}",
+                    "Move workloads to dedicated namespaces and apply NetworkPolicies for isolation",
+                ))
+                idx += 1
+        except ApiException:
+            pass
+
+    return findings
+
+
+# ============================================================
+# Ingress Scanner (KICS: Ingress Exposes Workload)
+# ============================================================
+
+def scan_ingress(namespaces: list[str]) -> list[SecurityFinding]:
+    findings = []
+    idx = 0
+    net_v1 = client.NetworkingV1Api()
+
+    for ns in namespaces:
+        try:
+            ingresses = net_v1.list_namespaced_ingress(ns)
+        except ApiException:
+            continue
+
+        for ing in ingresses.items:
+            for rule in (ing.spec.rules or []):
+                host = rule.host or "*"
+                for path in (rule.http.paths if rule.http else []):
+                    svc_name = path.backend.service.name if path.backend.service else "unknown"
+                    svc_port = ""
+                    if path.backend.service and path.backend.service.port:
+                        svc_port = str(path.backend.service.port.number or path.backend.service.port.name or "")
+                    findings.append(_finding(
+                        idx, "network", SEVERITY_MEDIUM,
+                        "Ingress exposes workload externally",
+                        f"Ingress '{ing.metadata.name}' exposes service '{svc_name}' at host '{host}'",
+                        ns, "Ingress", ing.metadata.name,
+                        f"host={host}, service={svc_name}, port={svc_port}",
+                        "Review whether external exposure is needed; add authentication and TLS termination",
+                    ))
+                    idx += 1
+
+    return findings
+
+
+# ============================================================
+# Dashboard Scanner (KICS: Dashboard Is Enabled)
+# ============================================================
+
+def scan_dashboard(apps_v1: client.AppsV1Api, namespaces: list[str]) -> list[SecurityFinding]:
+    findings = []
+    idx = 0
+
+    for ns in namespaces:
+        try:
+            deploys = apps_v1.list_namespaced_deployment(ns)
+        except ApiException:
+            continue
+
+        for deploy in deploys.items:
+            labels = deploy.metadata.labels or {}
+            d_name = deploy.metadata.name
+            if (labels.get("k8s-app") == "kubernetes-dashboard"
+                    or "kubernetes-dashboard" in d_name):
+                findings.append(_finding(
+                    idx, "runtime", SEVERITY_LOW,
+                    "Kubernetes Dashboard is deployed",
+                    f"Deployment '{d_name}' in namespace '{ns}' runs the Kubernetes Dashboard",
+                    ns, "Deployment", d_name,
+                    f"labels={labels}, name={d_name}",
+                    "Remove the Kubernetes Dashboard if not needed — it can be used as an attack vector",
+                ))
+                idx += 1
+
     return findings
 
 
@@ -330,9 +529,29 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
         except ApiException:
             continue
 
+        # KICS: Shared service account detection
+        sa_pod_map: dict[str, list[str]] = {}
+        for pod in pods.items:
+            sa = pod.spec.service_account_name or ""
+            if sa and sa != "default":
+                sa_pod_map.setdefault(sa, []).append(pod.metadata.name)
+
+        for sa, pod_names in sa_pod_map.items():
+            if len(pod_names) > 1:
+                findings.append(_finding(
+                    idx, "rbac", SEVERITY_MEDIUM,
+                    "Shared service account",
+                    f"ServiceAccount '{sa}' in {ns} is shared by {len(pod_names)} pods: {', '.join(pod_names)}",
+                    ns, "ServiceAccount", sa,
+                    f"pods={pod_names}",
+                    f"Assign a unique ServiceAccount to each workload instead of sharing '{sa}'",
+                ))
+                idx += 1
+
         for pod in pods.items:
             pod_name = pod.metadata.name
             pod_spec = pod.spec
+            annotations = pod.metadata.annotations or {}
 
             # Host namespace checks
             if pod_spec.host_pid:
@@ -378,7 +597,6 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                     ))
                     idx += 1
 
-                    # After the existing hostPath finding, check for runtime socket specifically
                     if any(sock in vol.host_path.path for sock in ("containerd.sock", "docker.sock", "crio.sock")):
                         findings.append(_finding(
                             idx, "runtime", SEVERITY_CRITICAL,
@@ -403,80 +621,242 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                         "Remove control-plane tolerations unless this pod truly needs to run on master nodes",
                     ))
                     idx += 1
-                    break  # one finding per pod
+                    break
+
+            # KICS: Unsafe sysctls (pod-level)
+            if pod_spec.security_context and pod_spec.security_context.sysctls:
+                for sysctl in pod_spec.security_context.sysctls:
+                    if sysctl.name not in _SAFE_SYSCTLS:
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_HIGH,
+                            "Pod uses unsafe sysctl",
+                            f"Pod '{pod_name}' sets unsafe sysctl '{sysctl.name}={sysctl.value}'",
+                            ns, "Pod", pod_name,
+                            f"sysctl: {sysctl.name}={sysctl.value}",
+                            f"Remove unsafe sysctl '{sysctl.name}' or use only safe sysctls (kernel.shm_rmid_forced, net.ipv4.*)",
+                        ))
+                        idx += 1
 
             # Container-level checks
             for container in pod_spec.containers:
                 sc = container.security_context
+                c_name = container.name
 
                 if sc is None:
                     findings.append(_finding(
                         idx, "runtime", SEVERITY_MEDIUM,
                         "Missing security context",
-                        f"Container '{container.name}' in pod '{pod_name}' has no securityContext",
+                        f"Container '{c_name}' in pod '{pod_name}' has no securityContext",
                         ns, "Pod", pod_name,
-                        f"container '{container.name}': securityContext is null",
+                        f"container '{c_name}': securityContext is null",
                         "Add securityContext with runAsNonRoot, readOnlyRootFilesystem, and drop ALL capabilities",
                     ))
                     idx += 1
-                    continue
-
-                if sc.privileged:
-                    findings.append(_finding(
-                        idx, "runtime", SEVERITY_CRITICAL,
-                        "Privileged container",
-                        f"Container '{container.name}' in pod '{pod_name}' runs as privileged",
-                        ns, "Pod", pod_name,
-                        "privileged: true",
-                        "Remove privileged: true and use specific capabilities instead",
-                    ))
-                    idx += 1
-
-                if sc.run_as_user == 0 or (not sc.run_as_non_root and sc.run_as_user is None):
-                    findings.append(_finding(
-                        idx, "runtime", SEVERITY_HIGH,
-                        "Container may run as root",
-                        f"Container '{container.name}' in pod '{pod_name}' has no runAsNonRoot constraint",
-                        ns, "Pod", pod_name,
-                        f"runAsNonRoot={sc.run_as_non_root}, runAsUser={sc.run_as_user}",
-                        "Set runAsNonRoot: true and runAsUser to a non-zero UID",
-                    ))
-                    idx += 1
-
-                if not sc.read_only_root_filesystem:
-                    findings.append(_finding(
-                        idx, "runtime", SEVERITY_MEDIUM,
-                        "Writable root filesystem",
-                        f"Container '{container.name}' in pod '{pod_name}' has writable root filesystem",
-                        ns, "Pod", pod_name,
-                        "readOnlyRootFilesystem: false or unset",
-                        "Set readOnlyRootFilesystem: true and use emptyDir for writable paths",
-                    ))
-                    idx += 1
-
-                # Capabilities
-                if sc.capabilities:
-                    added = set(sc.capabilities.add or [])
-                    dangerous = added & _DANGEROUS_CAPS
-                    if dangerous:
+                    # Still check KICS probes/apparmor/seccomp/imagePullPolicy for containers without securityContext
+                else:
+                    if sc.privileged:
                         findings.append(_finding(
-                            idx, "runtime", SEVERITY_HIGH,
-                            "Dangerous Linux capabilities",
-                            f"Container '{container.name}' in pod '{pod_name}' has capabilities: {dangerous}",
+                            idx, "runtime", SEVERITY_CRITICAL,
+                            "Privileged container",
+                            f"Container '{c_name}' in pod '{pod_name}' runs as privileged",
                             ns, "Pod", pod_name,
-                            f"capabilities.add: {list(added)}",
-                            f"Remove dangerous capabilities: {dangerous}. Drop ALL and add only what's needed.",
+                            "privileged: true",
+                            "Remove privileged: true and use specific capabilities instead",
                         ))
                         idx += 1
 
-                if sc.allow_privilege_escalation is True:
+                    if sc.run_as_user == 0 or (not sc.run_as_non_root and sc.run_as_user is None):
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_HIGH,
+                            "Container may run as root",
+                            f"Container '{c_name}' in pod '{pod_name}' has no runAsNonRoot constraint",
+                            ns, "Pod", pod_name,
+                            f"runAsNonRoot={sc.run_as_non_root}, runAsUser={sc.run_as_user}",
+                            "Set runAsNonRoot: true and runAsUser to a non-zero UID",
+                        ))
+                        idx += 1
+
+                    if not sc.read_only_root_filesystem:
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_MEDIUM,
+                            "Writable root filesystem",
+                            f"Container '{c_name}' in pod '{pod_name}' has writable root filesystem",
+                            ns, "Pod", pod_name,
+                            "readOnlyRootFilesystem: false or unset",
+                            "Set readOnlyRootFilesystem: true and use emptyDir for writable paths",
+                        ))
+                        idx += 1
+
+                    # Capabilities
+                    if sc.capabilities:
+                        added = set(sc.capabilities.add or [])
+                        dangerous = added & _DANGEROUS_CAPS
+                        if dangerous:
+                            findings.append(_finding(
+                                idx, "runtime", SEVERITY_HIGH,
+                                "Dangerous Linux capabilities",
+                                f"Container '{c_name}' in pod '{pod_name}' has capabilities: {dangerous}",
+                                ns, "Pod", pod_name,
+                                f"capabilities.add: {list(added)}",
+                                f"Remove dangerous capabilities: {dangerous}. Drop ALL and add only what's needed.",
+                            ))
+                            idx += 1
+
+                        # KICS: No drop ALL capabilities
+                        dropped = [c.upper() for c in (sc.capabilities.drop or [])]
+                        if "ALL" not in dropped:
+                            findings.append(_finding(
+                                idx, "runtime", SEVERITY_LOW,
+                                "Container does not drop all capabilities",
+                                f"Container '{c_name}' in pod '{pod_name}' does not drop ALL capabilities",
+                                ns, "Pod", pod_name,
+                                f"capabilities.drop: {sc.capabilities.drop or []}",
+                                "Set securityContext.capabilities.drop: ['ALL'] and add back only required capabilities",
+                            ))
+                            idx += 1
+
+                        # KICS: NET_RAW not dropped
+                        if "ALL" not in dropped and "NET_RAW" not in dropped:
+                            findings.append(_finding(
+                                idx, "runtime", SEVERITY_MEDIUM,
+                                "NET_RAW capability not dropped",
+                                f"Container '{c_name}' in pod '{pod_name}' does not drop NET_RAW — allows packet spoofing",
+                                ns, "Pod", pod_name,
+                                f"capabilities.drop: {sc.capabilities.drop or []}",
+                                "Add NET_RAW to securityContext.capabilities.drop or drop ALL capabilities",
+                            ))
+                            idx += 1
+                    elif sc:
+                        # Has securityContext but no capabilities block at all
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_LOW,
+                            "Container does not drop all capabilities",
+                            f"Container '{c_name}' in pod '{pod_name}' has no capabilities.drop defined",
+                            ns, "Pod", pod_name,
+                            "capabilities: not set",
+                            "Set securityContext.capabilities.drop: ['ALL'] and add back only required capabilities",
+                        ))
+                        idx += 1
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_MEDIUM,
+                            "NET_RAW capability not dropped",
+                            f"Container '{c_name}' in pod '{pod_name}' has no capabilities configured — NET_RAW is available",
+                            ns, "Pod", pod_name,
+                            "capabilities: not set",
+                            "Add NET_RAW to securityContext.capabilities.drop or drop ALL capabilities",
+                        ))
+                        idx += 1
+
+                    if sc.allow_privilege_escalation is True:
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_HIGH,
+                            "Privilege escalation allowed",
+                            f"Container '{c_name}' in pod '{pod_name}' allows privilege escalation",
+                            ns, "Pod", pod_name,
+                            "allowPrivilegeEscalation: true",
+                            "Set allowPrivilegeEscalation: false to prevent child processes from gaining more privileges",
+                        ))
+                        idx += 1
+
+                    # KICS: Unmasked procMount
+                    if getattr(sc, 'proc_mount', None) == "Unmasked":
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_HIGH,
+                            "Container runs with unmasked /proc",
+                            f"Container '{c_name}' in pod '{pod_name}' has procMount: Unmasked — full /proc access",
+                            ns, "Pod", pod_name,
+                            "procMount: Unmasked",
+                            "Set securityContext.procMount to Default or remove it entirely",
+                        ))
+                        idx += 1
+
+                # KICS: No seccomp profile
+                pod_seccomp = None
+                if pod_spec.security_context and pod_spec.security_context.seccomp_profile:
+                    pod_seccomp = pod_spec.security_context.seccomp_profile.type
+                container_seccomp = None
+                if sc and sc.seccomp_profile:
+                    container_seccomp = sc.seccomp_profile.type
+                has_valid_seccomp = (
+                    (container_seccomp and container_seccomp != "Unconfined")
+                    or (pod_seccomp and pod_seccomp != "Unconfined")
+                )
+                if not has_valid_seccomp:
                     findings.append(_finding(
-                        idx, "runtime", SEVERITY_HIGH,
-                        "Privilege escalation allowed",
-                        f"Container '{container.name}' in pod '{pod_name}' allows privilege escalation",
+                        idx, "runtime", SEVERITY_MEDIUM,
+                        "No seccomp profile configured",
+                        f"Container '{c_name}' in pod '{pod_name}' has no seccomp profile — all syscalls allowed",
                         ns, "Pod", pod_name,
-                        "allowPrivilegeEscalation: true",
-                        "Set allowPrivilegeEscalation: false to prevent child processes from gaining more privileges",
+                        f"seccompProfile: pod={pod_seccomp}, container={container_seccomp}",
+                        "Set securityContext.seccompProfile.type to RuntimeDefault or Localhost",
+                    ))
+                    idx += 1
+
+                # KICS: No AppArmor profile annotation
+                apparmor_key = f"container.apparmor.security.beta.kubernetes.io/{c_name}"
+                if apparmor_key not in annotations:
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_LOW,
+                        "No AppArmor profile configured",
+                        f"Container '{c_name}' in pod '{pod_name}' has no AppArmor profile annotation",
+                        ns, "Pod", pod_name,
+                        f"missing annotation: {apparmor_key}",
+                        f"Add annotation '{apparmor_key}: runtime/default' to the pod metadata",
+                    ))
+                    idx += 1
+
+                # KICS: No liveness probe
+                if not container.liveness_probe:
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_LOW,
+                        "No liveness probe configured",
+                        f"Container '{c_name}' in pod '{pod_name}' has no liveness probe",
+                        ns, "Pod", pod_name,
+                        "livenessProbe: not set",
+                        "Configure a livenessProbe to restart unresponsive containers",
+                    ))
+                    idx += 1
+
+                # KICS: No readiness probe
+                if not container.readiness_probe:
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_MEDIUM,
+                        "No readiness probe configured",
+                        f"Container '{c_name}' in pod '{pod_name}' has no readiness probe",
+                        ns, "Pod", pod_name,
+                        "readinessProbe: not set",
+                        "Configure a readinessProbe to avoid routing traffic to unready containers",
+                    ))
+                    idx += 1
+
+                # KICS: Writable mount on sensitive OS directory
+                for vm in (container.volume_mounts or []):
+                    mount = vm.mount_path
+                    is_sensitive = any(
+                        mount == d or mount.startswith(d + "/")
+                        for d in _SENSITIVE_OS_DIRS
+                    )
+                    if is_sensitive and not vm.read_only:
+                        findings.append(_finding(
+                            idx, "runtime", SEVERITY_HIGH,
+                            "Writable mount on sensitive OS directory",
+                            f"Container '{c_name}' in pod '{pod_name}' has writable mount at '{mount}'",
+                            ns, "Pod", pod_name,
+                            f"volumeMount: mountPath={mount}, readOnly={vm.read_only}",
+                            f"Set readOnly: true on the volume mount at '{mount}' or use a non-sensitive path",
+                        ))
+                        idx += 1
+
+                # KICS: imagePullPolicy not Always
+                pull_policy = container.image_pull_policy
+                if pull_policy and pull_policy != "Always":
+                    findings.append(_finding(
+                        idx, "runtime", SEVERITY_LOW,
+                        "Image pull policy not set to Always",
+                        f"Container '{c_name}' in pod '{pod_name}' has imagePullPolicy: {pull_policy}",
+                        ns, "Pod", pod_name,
+                        f"imagePullPolicy: {pull_policy}",
+                        "Set imagePullPolicy: Always to ensure fresh images are pulled on each deployment",
                     ))
                     idx += 1
 
@@ -491,6 +871,19 @@ def scan_runtime(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, namespaces: li
                     ns, "Pod", pod_name,
                     f"serviceAccountName=default, automountServiceAccountToken={auto_mount}",
                     "Set automountServiceAccountToken: false or use a dedicated service account",
+                ))
+                idx += 1
+
+            # KICS: SA name undefined
+            sa = pod_spec.service_account_name
+            if not sa or sa == "default":
+                findings.append(_finding(
+                    idx, "rbac", SEVERITY_MEDIUM,
+                    "Service account name undefined",
+                    f"Pod '{pod_name}' in {ns} uses default/undefined serviceAccountName",
+                    ns, "Pod", pod_name,
+                    f"serviceAccountName={sa!r}",
+                    f"Set an explicit serviceAccountName for pod '{pod_name}' to restrict API access",
                 ))
                 idx += 1
 

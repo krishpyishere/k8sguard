@@ -635,6 +635,406 @@ SCENARIO_POOL = [
              "remediation": "Remove the hostPath volume and use PersistentVolumeClaims"},
         ],
     },
+
+    # ---- KICS-derived scenarios: Runtime/Container ----
+
+    # Tier 0: Remediation drills
+    {
+        "difficulty": 0.15,
+        "category": "runtime",
+        "description": "A container does not drop ALL capabilities",
+        "alert": "REMEDIATION DRILL: Delete the pod 'no-drop-caps' which has no capability drop. Fix: kubectl delete pod no-drop-caps -n default",
+        "injections": [
+            {"type": "no_drop_caps", "params": {"namespace": "default", "name": "no-drop-caps"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "Container does not drop all capabilities",
+             "resource_kind": "Pod", "resource_name": "no-drop-caps", "namespace": "default",
+             "evidence": "capabilities.drop: []",
+             "remediation": "kubectl delete pod no-drop-caps -n default"},
+        ],
+    },
+    {
+        "difficulty": 0.15,
+        "category": "runtime",
+        "description": "A container's imagePullPolicy is not set to Always",
+        "alert": "REMEDIATION DRILL: Delete the pod 'pull-not-always' with incorrect pull policy. Fix: kubectl delete pod pull-not-always -n default",
+        "injections": [
+            {"type": "image_pull_not_always", "params": {"namespace": "default", "name": "pull-not-always"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "Image pull policy not set to Always",
+             "resource_kind": "Pod", "resource_name": "pull-not-always", "namespace": "default",
+             "evidence": "imagePullPolicy: IfNotPresent",
+             "remediation": "kubectl delete pod pull-not-always -n default"},
+        ],
+    },
+    # Tier 1: Single obvious vulnerability
+    {
+        "difficulty": 0.2,
+        "category": "runtime",
+        "description": "A container does not drop NET_RAW capability, enabling packet spoofing",
+        "alert": "SECURITY ALERT: Container with NET_RAW capability detected",
+        "injections": [
+            {"type": "net_raw_not_dropped", "params": {"namespace": "default", "name": "net-raw-pod"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "NET_RAW capability not dropped",
+             "resource_kind": "Pod", "resource_name": "net-raw-pod", "namespace": "default",
+             "evidence": "capabilities.drop: ['SYS_ADMIN'] (NET_RAW not dropped)",
+             "remediation": "Add NET_RAW to securityContext.capabilities.drop or drop ALL capabilities"},
+        ],
+    },
+    {
+        "difficulty": 0.2,
+        "category": "runtime",
+        "description": "A pod is running without a liveness probe configured",
+        "alert": "SECURITY ALERT: Pod detected without liveness probe",
+        "injections": [
+            {"type": "no_liveness_probe", "params": {"namespace": "default", "name": "no-liveness"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "No liveness probe configured",
+             "resource_kind": "Pod", "resource_name": "no-liveness", "namespace": "default",
+             "evidence": "livenessProbe: not set",
+             "remediation": "Configure a livenessProbe to restart unresponsive containers"},
+        ],
+    },
+    {
+        "difficulty": 0.25,
+        "category": "runtime",
+        "description": "A pod is running without a readiness probe configured",
+        "alert": "SECURITY ALERT: Pod detected without readiness probe",
+        "injections": [
+            {"type": "no_readiness_probe", "params": {"namespace": "default", "name": "no-readiness"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "No readiness probe configured",
+             "resource_kind": "Pod", "resource_name": "no-readiness", "namespace": "default",
+             "evidence": "readinessProbe: not set",
+             "remediation": "Configure a readinessProbe to avoid routing traffic to unready containers"},
+        ],
+    },
+    {
+        "difficulty": 0.25,
+        "category": "runtime",
+        "description": "A pod has no seccomp profile configured, allowing all syscalls",
+        "alert": "SECURITY ALERT: Container without seccomp profile detected",
+        "injections": [
+            {"type": "no_seccomp_profile", "params": {"namespace": "default", "name": "no-seccomp"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "No seccomp profile configured",
+             "resource_kind": "Pod", "resource_name": "no-seccomp", "namespace": "default",
+             "evidence": "seccompProfile: pod=None, container=None",
+             "remediation": "Set securityContext.seccompProfile.type to RuntimeDefault or Localhost"},
+        ],
+    },
+    {
+        "difficulty": 0.2,
+        "category": "runtime",
+        "description": "A pod has no AppArmor profile annotation",
+        "alert": "SECURITY ALERT: Container without AppArmor profile detected",
+        "injections": [
+            {"type": "no_apparmor_profile", "params": {"namespace": "default", "name": "no-apparmor"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "No AppArmor profile configured",
+             "resource_kind": "Pod", "resource_name": "no-apparmor", "namespace": "default",
+             "evidence": "missing annotation: container.apparmor.security.beta.kubernetes.io/no-apparmor",
+             "remediation": "Add AppArmor profile annotation to the pod metadata"},
+        ],
+    },
+    # Tier 2: Requires investigation
+    {
+        "difficulty": 0.4,
+        "category": "runtime",
+        "description": "A container runs with procMount: Unmasked, exposing the host /proc filesystem",
+        "alert": "SECURITY ALERT: Container with unmasked /proc mount detected",
+        "injections": [
+            {"type": "unmasked_proc_mount", "params": {"namespace": "default", "name": "unmasked-proc"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Container runs with unmasked /proc",
+             "resource_kind": "Pod", "resource_name": "unmasked-proc", "namespace": "default",
+             "evidence": "procMount: Unmasked",
+             "remediation": "Set securityContext.procMount to Default or remove it entirely"},
+        ],
+    },
+    {
+        "difficulty": 0.45,
+        "category": "runtime",
+        "description": "A pod has writable volume mounts on sensitive OS directories",
+        "alert": "SECURITY ALERT: Writable volume mount on OS directory detected",
+        "injections": [
+            {"type": "writable_os_dir_mount", "params": {"namespace": "default", "name": "writable-os-dir", "mount_path": "/etc"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Writable mount on sensitive OS directory",
+             "resource_kind": "Pod", "resource_name": "writable-os-dir", "namespace": "default",
+             "evidence": "volumeMount: mountPath=/etc, readOnly=False",
+             "remediation": "Set readOnly: true on the volume mount at '/etc' or use a non-sensitive path"},
+        ],
+    },
+    {
+        "difficulty": 0.45,
+        "category": "runtime",
+        "description": "A pod configures unsafe kernel sysctls that could affect other pods on the node",
+        "alert": "SECURITY ALERT: Unsafe sysctls detected in pod configuration",
+        "injections": [
+            {"type": "unsafe_sysctls", "params": {"namespace": "default", "name": "unsafe-sysctl"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Pod uses unsafe sysctl",
+             "resource_kind": "Pod", "resource_name": "unsafe-sysctl", "namespace": "default",
+             "evidence": "sysctl: kernel.msgmax=65536",
+             "remediation": "Remove unsafe sysctls or use only safe sysctls"},
+        ],
+    },
+    {
+        "difficulty": 0.35,
+        "category": "network",
+        "description": "An Ingress resource exposes a workload externally without authentication",
+        "alert": "SECURITY ALERT: Ingress exposing internal workload detected",
+        "injections": [
+            {"type": "ingress_exposes_workload", "params": {"namespace": "default", "name": "exposed-ingress", "service_name": "app-svc"}},
+        ],
+        "expected_findings": [
+            {"category": "network", "severity": SEVERITY_MEDIUM, "title": "Ingress exposes workload externally",
+             "resource_kind": "Ingress", "resource_name": "exposed-ingress", "namespace": "default",
+             "evidence": "host=app.example.com, service=app-svc, port=80",
+             "remediation": "Review whether external exposure is needed; add authentication and TLS termination"},
+        ],
+    },
+    {
+        "difficulty": 0.35,
+        "category": "runtime",
+        "description": "The Kubernetes Dashboard is deployed in the cluster",
+        "alert": "SECURITY ALERT: Kubernetes Dashboard deployment detected",
+        "injections": [
+            {"type": "dashboard_enabled", "params": {"namespace": "default", "name": "kubernetes-dashboard"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "Kubernetes Dashboard is deployed",
+             "resource_kind": "Deployment", "resource_name": "kubernetes-dashboard", "namespace": "default",
+             "evidence": "labels={'k8s-app': 'kubernetes-dashboard'}",
+             "remediation": "Remove the Kubernetes Dashboard if not needed"},
+        ],
+    },
+    # Tier 3: Multi-vulnerability combos
+    {
+        "difficulty": 0.6,
+        "category": "mixed",
+        "description": "Container hardening gaps: no cap drop + NET_RAW + no seccomp + no AppArmor",
+        "alert": "SECURITY ALERT: Multiple container hardening deficiencies detected",
+        "injections": [
+            {"type": "no_drop_caps", "params": {"namespace": "default", "name": "no-drop-caps"}},
+            {"type": "net_raw_not_dropped", "params": {"namespace": "default", "name": "net-raw-pod"}},
+            {"type": "no_seccomp_profile", "params": {"namespace": "default", "name": "no-seccomp"}},
+            {"type": "no_apparmor_profile", "params": {"namespace": "default", "name": "no-apparmor"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "Container does not drop all capabilities",
+             "resource_kind": "Pod", "resource_name": "no-drop-caps", "namespace": "default",
+             "evidence": "capabilities.drop: []",
+             "remediation": "Drop ALL capabilities"},
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "NET_RAW capability not dropped",
+             "resource_kind": "Pod", "resource_name": "net-raw-pod", "namespace": "default",
+             "evidence": "NET_RAW not dropped",
+             "remediation": "Drop NET_RAW or ALL capabilities"},
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "No seccomp profile configured",
+             "resource_kind": "Pod", "resource_name": "no-seccomp", "namespace": "default",
+             "evidence": "seccompProfile: not set",
+             "remediation": "Set seccompProfile.type to RuntimeDefault"},
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "No AppArmor profile configured",
+             "resource_kind": "Pod", "resource_name": "no-apparmor", "namespace": "default",
+             "evidence": "missing apparmor annotation",
+             "remediation": "Add AppArmor profile annotation"},
+        ],
+    },
+    {
+        "difficulty": 0.55,
+        "category": "mixed",
+        "description": "Runtime exposure combo: unmasked /proc + writable OS dir mount + unsafe sysctls",
+        "alert": "SECURITY ALERT: Multiple runtime security misconfigurations detected",
+        "injections": [
+            {"type": "unmasked_proc_mount", "params": {"namespace": "default", "name": "unmasked-proc"}},
+            {"type": "writable_os_dir_mount", "params": {"namespace": "default", "name": "writable-os-dir", "mount_path": "/var"}},
+            {"type": "unsafe_sysctls", "params": {"namespace": "default", "name": "unsafe-sysctl"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Container runs with unmasked /proc",
+             "resource_kind": "Pod", "resource_name": "unmasked-proc", "namespace": "default",
+             "evidence": "procMount: Unmasked",
+             "remediation": "Set procMount to Default"},
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Writable mount on sensitive OS directory",
+             "resource_kind": "Pod", "resource_name": "writable-os-dir", "namespace": "default",
+             "evidence": "mountPath=/var, readOnly=False",
+             "remediation": "Set readOnly: true"},
+            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Pod uses unsafe sysctl",
+             "resource_kind": "Pod", "resource_name": "unsafe-sysctl", "namespace": "default",
+             "evidence": "kernel.msgmax=65536",
+             "remediation": "Remove unsafe sysctls"},
+        ],
+    },
+    {
+        "difficulty": 0.65,
+        "category": "mixed",
+        "description": "External exposure combo: dashboard + ingress + no liveness/readiness probes",
+        "alert": "SECURITY ALERT: External exposure and availability issues detected",
+        "injections": [
+            {"type": "dashboard_enabled", "params": {"namespace": "default", "name": "kubernetes-dashboard"}},
+            {"type": "ingress_exposes_workload", "params": {"namespace": "default", "name": "exposed-ingress", "service_name": "app-svc"}},
+            {"type": "no_liveness_probe", "params": {"namespace": "default", "name": "no-liveness"}},
+            {"type": "no_readiness_probe", "params": {"namespace": "default", "name": "no-readiness"}},
+        ],
+        "expected_findings": [
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "Kubernetes Dashboard is deployed",
+             "resource_kind": "Deployment", "resource_name": "kubernetes-dashboard", "namespace": "default",
+             "evidence": "k8s-app=kubernetes-dashboard",
+             "remediation": "Remove the Kubernetes Dashboard"},
+            {"category": "network", "severity": SEVERITY_MEDIUM, "title": "Ingress exposes workload externally",
+             "resource_kind": "Ingress", "resource_name": "exposed-ingress", "namespace": "default",
+             "evidence": "host=app.example.com, service=app-svc",
+             "remediation": "Add authentication and TLS to the Ingress"},
+            {"category": "runtime", "severity": SEVERITY_LOW, "title": "No liveness probe configured",
+             "resource_kind": "Pod", "resource_name": "no-liveness", "namespace": "default",
+             "evidence": "livenessProbe: not set",
+             "remediation": "Configure a livenessProbe"},
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "No readiness probe configured",
+             "resource_kind": "Pod", "resource_name": "no-readiness", "namespace": "default",
+             "evidence": "readinessProbe: not set",
+             "remediation": "Configure a readinessProbe"},
+        ],
+    },
+
+    # ---- KICS-derived scenarios: RBAC/Identity ----
+
+    {
+        "difficulty": 0.3,
+        "category": "rbac",
+        "description": "A ClusterRole grants exec permission on pods, allowing shell access to containers",
+        "alert": "SECURITY ALERT: RBAC role with pods/exec permission detected",
+        "injections": [
+            {"type": "rbac_exec_permission", "params": {"namespace": "default", "role_name": "allow-exec"}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "RBAC grants exec permission on pods",
+             "resource_kind": "ClusterRole", "resource_name": "allow-exec", "namespace": "*",
+             "evidence": "verbs=['get', 'create'], resources=['pods', 'pods/exec']",
+             "remediation": "Remove 'pods/exec' from ClusterRole 'allow-exec' resources"},
+        ],
+    },
+    {
+        "difficulty": 0.3,
+        "category": "rbac",
+        "description": "A ClusterRole grants port-forward permission, bypassing network policies",
+        "alert": "SECURITY ALERT: RBAC role with pods/portforward permission detected",
+        "injections": [
+            {"type": "rbac_port_forward", "params": {"namespace": "default", "role_name": "allow-port-forward"}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "RBAC grants port-forward permission",
+             "resource_kind": "ClusterRole", "resource_name": "allow-port-forward", "namespace": "*",
+             "evidence": "verbs=['get', 'create'], resources=['pods', 'pods/portforward']",
+             "remediation": "Remove 'pods/portforward' from ClusterRole 'allow-port-forward' resources"},
+        ],
+    },
+    {
+        "difficulty": 0.35,
+        "category": "rbac",
+        "description": "A ClusterRole grants create permission on pods, a privilege escalation vector",
+        "alert": "SECURITY ALERT: RBAC role with permissive pod creation access detected",
+        "injections": [
+            {"type": "rbac_create_pods", "params": {"namespace": "default", "role_name": "allow-create-pods"}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "RBAC grants create permission on pods",
+             "resource_kind": "ClusterRole", "resource_name": "allow-create-pods", "namespace": "*",
+             "evidence": "verbs=['create', 'get', 'list'], resources=['pods'], apiGroups=['']",
+             "remediation": "Remove 'create' verb on 'pods' from ClusterRole 'allow-create-pods'"},
+        ],
+    },
+    {
+        "difficulty": 0.35,
+        "category": "rbac",
+        "description": "A Role is bound to the default service account, granting implicit access to all pods",
+        "alert": "SECURITY ALERT: Role binding to default service account detected",
+        "injections": [
+            {"type": "role_binding_default_sa", "params": {"namespace": "default", "role_name": "default-sa-role"}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "Role bound to default service account",
+             "resource_kind": "RoleBinding", "resource_name": "default-sa-role-binding", "namespace": "default",
+             "evidence": "roleRef=Role/default-sa-role, subject=ServiceAccount/default",
+             "remediation": "Create a dedicated ServiceAccount instead of binding roles to 'default'"},
+        ],
+    },
+    {
+        "difficulty": 0.4,
+        "category": "rbac",
+        "description": "Multiple pods share the same service account token, increasing blast radius",
+        "alert": "SECURITY ALERT: Shared service account detected across multiple pods",
+        "injections": [
+            {"type": "shared_service_account", "params": {"namespace": "default", "sa_name": "shared-sa", "pod_count": 2}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "Shared service account",
+             "resource_kind": "ServiceAccount", "resource_name": "shared-sa", "namespace": "default",
+             "evidence": "pods=['shared-sa-pod-0', 'shared-sa-pod-1']",
+             "remediation": "Assign a unique ServiceAccount to each workload instead of sharing 'shared-sa'"},
+        ],
+    },
+    {
+        "difficulty": 0.2,
+        "category": "rbac",
+        "description": "A pod is running with no explicit service account, defaulting to the namespace default SA",
+        "alert": "SECURITY ALERT: Pod with undefined service account name detected",
+        "injections": [
+            {"type": "sa_name_undefined", "params": {"namespace": "default", "name": "no-sa-pod"}},
+        ],
+        "expected_findings": [
+            {"category": "rbac", "severity": SEVERITY_MEDIUM, "title": "Service account name undefined",
+             "resource_kind": "Pod", "resource_name": "no-sa-pod", "namespace": "default",
+             "evidence": "serviceAccountName='default'",
+             "remediation": "Set an explicit serviceAccountName for pod 'no-sa-pod' to restrict API access"},
+        ],
+    },
+
+    # ---- KICS-derived scenarios: Network ----
+
+    {
+        "difficulty": 0.25,
+        "category": "network",
+        "description": "A workload is deployed in the default namespace with no isolation",
+        "alert": "SECURITY ALERT: Workload detected in unrecommended 'default' namespace",
+        "injections": [
+            {"type": "default_namespace_used", "params": {"namespace": "default", "name": "frontend-app"}},
+        ],
+        "expected_findings": [
+            {"category": "network", "severity": SEVERITY_MEDIUM, "title": "Workload in default namespace",
+             "resource_kind": "Pod", "resource_name": "frontend-app", "namespace": "default",
+             "evidence": "namespace=default, pod=frontend-app",
+             "remediation": "Move workloads to dedicated namespaces and apply NetworkPolicies for isolation"},
+        ],
+    },
+    {
+        "difficulty": 0.4,
+        "category": "network",
+        "description": "A NetworkPolicy exists but its podSelector matches no running pods",
+        "alert": "SECURITY ALERT: Ineffective NetworkPolicy detected — policy targets no pods",
+        "injections": [
+            {"type": "network_policy_no_target", "params": {"namespace": "default", "name": "web-app",
+                                                             "policy_name": "orphan-netpol"}},
+        ],
+        "expected_findings": [
+            {"category": "network", "severity": SEVERITY_LOW,
+             "title": "NetworkPolicy not targeting any pod",
+             "resource_kind": "NetworkPolicy", "resource_name": "orphan-netpol", "namespace": "default",
+             "evidence": "podSelector.matchLabels={'nonexistent-label': 'true'}, matched_pods=0",
+             "remediation": "Update the podSelector in NetworkPolicy 'orphan-netpol' to match actual pod labels, or remove the unused policy"},
+        ],
+    },
 ]
 
 
