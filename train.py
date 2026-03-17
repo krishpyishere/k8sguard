@@ -101,14 +101,29 @@ WORKFLOW:
 
 SECURITY CHECKS:
   RBAC: wildcard roles (* verbs/resources), privilege escalation verbs (escalate/bind/impersonate),
-        broad secrets access, cluster-admin bindings, wildcard namespaced Roles
+        broad secrets access, cluster-admin bindings, wildcard namespaced Roles,
+        pods/exec permission, pods/portforward permission, permissive pod creation,
+        roles bound to default service account, shared service accounts, undefined service account name
   Secrets: secrets in env vars, hardcoded credentials in plain-text env values, sensitive data in ConfigMaps
   Network: missing NetworkPolicies, no egress restrictions, NodePort/LoadBalancer exposure,
-           unauthenticated database services (Redis/Postgres/MySQL on common ports)
+           unauthenticated database services (Redis/Postgres/MySQL on common ports),
+           Ingress exposing workloads externally, workloads in default namespace,
+           NetworkPolicies not targeting any pods (ineffective policies)
   Runtime: privileged containers, hostPID/hostNetwork/hostIPC, hostPath mounts (especially / and runtime sockets),
            root UID, writable root filesystem, dangerous capabilities, allowPrivilegeEscalation,
-           control-plane node tolerations, missing security contexts
-  Supply Chain: :latest tags, no digest pinning, missing resource limits
+           control-plane node tolerations, missing security contexts,
+           containers not dropping ALL capabilities, NET_RAW capability not dropped,
+           missing seccomp profile, missing AppArmor profile, unmasked /proc mount,
+           writable mounts on sensitive OS dirs (/etc, /var, /usr), unsafe sysctls,
+           missing liveness/readiness probes, Kubernetes Dashboard deployed
+  Supply Chain: :latest tags, no digest pinning, missing resource limits, imagePullPolicy not Always
+
+REMEDIATION COMMANDS (use these — kubectl edit is NOT supported):
+  - kubectl delete pod <name> -n <ns>               (remove vulnerable pod)
+  - kubectl delete clusterrole <name>                (remove overpermissive role)
+  - kubectl delete clusterrolebinding <name>         (remove dangerous binding)
+  - kubectl delete svc <name> -n <ns>                (remove exposed service)
+  - kubectl scale deployment <name> -n <ns> --replicas=0  (disable deployment)
 
 Be systematic: scan all domains, then report findings and remediate.
 Be efficient: minimize unnecessary commands.
@@ -122,7 +137,7 @@ Output one command per line. No explanations, just commands."""
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="GRPO training for K8sGuard security scanner agent")
-    parser.add_argument("--model-id", default="Qwen/Qwen3-8B", help="Agent model to fine-tune")
+    parser.add_argument("--model-id", default="Qwen/Qwen3-4B-Instruct-2507", help="Agent model to fine-tune")
     parser.add_argument("--env-url", default="http://localhost:8000", help="OpenEnv server URL")
     parser.add_argument("--dataset-size", type=int, default=50, help="Number of training episodes")
     parser.add_argument("--max-turns", type=int, default=25, help="Max commands per episode")
@@ -363,9 +378,10 @@ def main() -> None:
     )
 
     # ---- LoRA config (fits 8B model on single GPU) ----
+    lora_r = 32 if "4B" in args.model_id else 64
     peft_config = LoraConfig(
-        r=64,
-        lora_alpha=128,
+        r=lora_r,
+        lora_alpha=lora_r * 2,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
