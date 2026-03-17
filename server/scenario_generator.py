@@ -746,21 +746,7 @@ SCENARIO_POOL = [
         ],
     },
     # Tier 2: Requires investigation
-    {
-        "difficulty": 0.4,
-        "category": "runtime",
-        "description": "A container runs with procMount: Unmasked, exposing the host /proc filesystem",
-        "alert": "SECURITY ALERT: Container with unmasked /proc mount detected",
-        "injections": [
-            {"type": "unmasked_proc_mount", "params": {"namespace": "default", "name": "unmasked-proc"}},
-        ],
-        "expected_findings": [
-            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Container runs with unmasked /proc",
-             "resource_kind": "Pod", "resource_name": "unmasked-proc", "namespace": "default",
-             "evidence": "procMount: Unmasked",
-             "remediation": "Set securityContext.procMount to Default or remove it entirely"},
-        ],
-    },
+    # NOTE: unmasked_proc_mount scenario skipped — requires ProcMountType feature gate (not enabled on k3s)
     {
         "difficulty": 0.45,
         "category": "runtime",
@@ -855,18 +841,14 @@ SCENARIO_POOL = [
     {
         "difficulty": 0.55,
         "category": "mixed",
-        "description": "Runtime exposure combo: unmasked /proc + writable OS dir mount + unsafe sysctls",
+        "description": "Runtime exposure combo: writable OS dir mount + unsafe sysctls + no seccomp",
         "alert": "SECURITY ALERT: Multiple runtime security misconfigurations detected",
         "injections": [
-            {"type": "unmasked_proc_mount", "params": {"namespace": "default", "name": "unmasked-proc"}},
             {"type": "writable_os_dir_mount", "params": {"namespace": "default", "name": "writable-os-dir", "mount_path": "/var"}},
             {"type": "unsafe_sysctls", "params": {"namespace": "default", "name": "unsafe-sysctl"}},
+            {"type": "no_seccomp_profile", "params": {"namespace": "default", "name": "no-seccomp"}},
         ],
         "expected_findings": [
-            {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Container runs with unmasked /proc",
-             "resource_kind": "Pod", "resource_name": "unmasked-proc", "namespace": "default",
-             "evidence": "procMount: Unmasked",
-             "remediation": "Set procMount to Default"},
             {"category": "runtime", "severity": SEVERITY_HIGH, "title": "Writable mount on sensitive OS directory",
              "resource_kind": "Pod", "resource_name": "writable-os-dir", "namespace": "default",
              "evidence": "mountPath=/var, readOnly=False",
@@ -875,6 +857,10 @@ SCENARIO_POOL = [
              "resource_kind": "Pod", "resource_name": "unsafe-sysctl", "namespace": "default",
              "evidence": "kernel.msgmax=65536",
              "remediation": "Remove unsafe sysctls"},
+            {"category": "runtime", "severity": SEVERITY_MEDIUM, "title": "No seccomp profile configured",
+             "resource_kind": "Pod", "resource_name": "no-seccomp", "namespace": "default",
+             "evidence": "seccompProfile: not set",
+             "remediation": "Set seccompProfile.type to RuntimeDefault"},
         ],
     },
     {
