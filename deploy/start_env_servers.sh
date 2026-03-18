@@ -20,6 +20,7 @@ for i in $(seq 0 $((NUM_RANKS - 1))); do
 
     echo "  Rank $i: port=$PORT namespace=$NS log=$LOG"
 
+    NUM_RANKS="$NUM_RANKS" \
     TRAINING_NAMESPACE="$NS" \
     LLM_BACKEND="${LLM_BACKEND:-openai}" \
     LLM_MODEL="${LLM_MODEL:-nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8}" \

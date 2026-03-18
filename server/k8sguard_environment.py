@@ -62,6 +62,8 @@ class K8sGuardEnvironment(Environment):
             self._training_namespace = os.environ.get("TRAINING_NAMESPACE", "k8sguard-training")
             self._episode_count = 0
             self._curriculum_enabled = os.environ.get("CURRICULUM", "1") == "1"
+            self._num_ranks = int(os.environ.get("NUM_RANKS", "1"))
+            self._category_cycle = ["runtime", "rbac", "secrets", "network", "supply_chain"]
 
             logger.info(f"K8sGuardEnvironment initialized (mode={self.mode}, curriculum={self._curriculum_enabled})")
         except Exception as e:
@@ -86,12 +88,13 @@ class K8sGuardEnvironment(Environment):
             # Clean up previous training resources (cleanup polls until empty)
             self.injector.cleanup(self._training_namespace)
 
-            # Curriculum: ramp difficulty from 0.15 to 0.9 over episodes
+            # Curriculum: ramp difficulty + rotate categories
             if self._curriculum_enabled:
                 difficulty = min(0.15 + self._episode_count * 0.002, 0.9)
+                category = self._category_cycle[self._episode_count % len(self._category_cycle)]
             else:
                 difficulty = float(os.environ.get("DIFFICULTY", "0.3"))
-            category = os.environ.get("SCAN_CATEGORY", None)
+                category = os.environ.get("SCAN_CATEGORY", None)
             self.scenario = self.generator.generate(difficulty, category)
 
             # Find the matching template to get injection instructions
@@ -200,6 +203,22 @@ class K8sGuardEnvironment(Environment):
         else:
             reward, feedback = 0.0, "Action executed."
 
+        # Progressive investigation gate: scales with NUM_RANKS for parallel training
+        _gate_ep_1 = max(200 // self._num_ranks, 20)
+        _gate_ep_2 = max(500 // self._num_ranks, 50)
+        if self._episode_count < _gate_ep_1:
+            _gate_requirement = 0
+        elif self._episode_count < _gate_ep_2:
+            _gate_requirement = 1
+        else:
+            _gate_requirement = 2
+
+        _investigation_count = sum(
+            1 for h in self.history
+            if not h["command"].startswith(("finding:", "remediate:"))
+        )
+        _can_complete = not (is_finding and self.scenario and _investigation_count < _gate_requirement)
+
         logger.info(f"    -> reward={reward:.2f} | {feedback[:80]}")
 
         done = False
@@ -216,7 +235,7 @@ class K8sGuardEnvironment(Environment):
             reward += outcome  # replace with outcome score
             feedback = f"Scan timeout. {outcome_reason}"
 
-        elif is_finding and self.scenario:
+        elif is_finding and self.scenario and _can_complete:
             is_complete, reason = self.judge.verify_scan_complete(
                 self.scenario, self.found_findings, self.history
             )
