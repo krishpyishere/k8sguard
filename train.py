@@ -369,7 +369,7 @@ def main() -> None:
         vllm_server_base_url=args.vllm_server_url if args.vllm_mode == "server" else None,
         vllm_server_timeout=args.vllm_server_timeout,
         vllm_gpu_memory_utilization=0.3,
-        vllm_max_model_length=4096,
+        vllm_max_model_length=8192,
         output_dir=str(output_dir),
         max_steps=args.max_steps,
         num_train_epochs=args.num_epochs,
