@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -345,8 +346,12 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # ---- Connect to OpenEnv server ----
-    env = K8sGuardEnv(base_url=args.env_url)
+    # ---- Connect to OpenEnv server (per-rank for parallel rollouts) ----
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    env_port = int(args.env_url.rsplit(":", 1)[-1]) + local_rank
+    env_url = f"http://localhost:{env_port}"
+    logger.info(f"Rank {local_rank}: connecting to env server at {env_url}")
+    env = K8sGuardEnv(base_url=env_url)
 
     # ---- Dataset (each entry triggers one episode) ----
     dataset_prompt = "Scan this Kubernetes cluster for security vulnerabilities."
