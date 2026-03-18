@@ -192,61 +192,44 @@ class K8sGuardEnvironment(Environment):
         else:
             output = "Use kubectl commands, 'finding: <description>', or 'remediate: kubectl <command>'."
 
-        # Score the action (judge handles repeat penalties in its heuristic)
+        # Score the action — small per-step rewards (outcome reward dominates at episode end)
         if self.scenario:
             reward, feedback = self.judge.evaluate(
                 action.command, output, self.scenario, self.history, self.found_findings
             )
         else:
-            reward, feedback = 0.1, "Action executed."
-
-        # Progressive investigation gate: ramps over episodes
-        # Episodes 0-200: gate=0, 200-500: gate=1, 500+: gate=2
-        if self._episode_count < 200:
-            _gate_requirement = 0
-        elif self._episode_count < 500:
-            _gate_requirement = 1
-        else:
-            _gate_requirement = 2
-
-        _investigation_count = sum(
-            1 for h in self.history
-            if not h["command"].startswith(("finding:", "remediate:"))
-        )
-        _insufficient_investigation = is_finding and self.scenario and _investigation_count < _gate_requirement
-        if _insufficient_investigation and reward > 0:
-            reward = 0.1
-            feedback += f" (reduced: need {_gate_requirement} investigation steps first, have {_investigation_count})"
+            reward, feedback = 0.0, "Action executed."
 
         logger.info(f"    -> reward={reward:.2f} | {feedback[:80]}")
 
         done = False
 
-        # Check completion
+        # Check completion or timeout — apply outcome reward
         if self._step_count >= self.max_steps:
             done = True
-            # Soft timeout: -2.0 penalty on natural sum (preserves investigation signal)
+            # Timeout: compute outcome reward, zero out per-step accumulation
+            outcome, outcome_reason = self.judge.compute_outcome_reward(
+                self.scenario, self.found_findings, self.history, timed_out=True,
+            )
             raw_sum = sum(h.get("reward", 0) for h in self.history) + reward
-            reward -= raw_sum
-            reward += max(raw_sum - 2.0, -3.0)  # floor at -3.0 total
-            feedback = "Scan timeout — not all vulnerabilities found."
+            reward -= raw_sum  # zero out per-step total
+            reward += outcome  # replace with outcome score
+            feedback = f"Scan timeout. {outcome_reason}"
 
-        elif is_finding and self.scenario and not _insufficient_investigation:
+        elif is_finding and self.scenario:
             is_complete, reason = self.judge.verify_scan_complete(
                 self.scenario, self.found_findings, self.history
             )
             if is_complete:
                 done = True
-                # Remediation bonus: +2.0 base + 1.0 per successful remediation (max +4.0)
-                remediation_count = sum(
-                    1 for h in self.history
-                    if h["command"].startswith("remediate:") and h.get("reward", 0) > 0
+                # Scan complete: compute outcome reward, zero out per-step accumulation
+                outcome, outcome_reason = self.judge.compute_outcome_reward(
+                    self.scenario, self.found_findings, self.history, timed_out=False,
                 )
-                completion_bonus = 2.0 + min(remediation_count * 1.0, 2.0)
-                reward += completion_bonus
-                feedback = f"Scan complete! {reason}"
-                if remediation_count > 0:
-                    feedback += f" ({remediation_count} successful remediation(s), bonus +{completion_bonus:.1f})"
+                raw_sum = sum(h.get("reward", 0) for h in self.history) + reward
+                reward -= raw_sum  # zero out per-step total
+                reward += outcome  # replace with outcome score
+                feedback = f"Scan complete! {reason} {outcome_reason}"
 
         self.history.append({
             "step": self._step_count,

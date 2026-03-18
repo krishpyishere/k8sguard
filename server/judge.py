@@ -95,57 +95,32 @@ class SecurityJudge:
         # Repeated command penalty
         repeat_count = sum(1 for h in history if h.get("command") == command)
         if repeat_count >= 2:
-            return -0.5, "Command blocked — repeated too many times."
+            return -0.2, "Command blocked — repeated too many times."
         if repeat_count == 1:
-            return -0.2, "Repeated command — try a different approach."
+            return -0.1, "Repeated command — try a different approach."
 
-        # Finding submission
+        # Finding submission — small per-step reward; outcome score dominates
         if cmd_lower.startswith("finding:"):
             finding_text = command[8:].strip().lower()
-            best_match = None
-            best_score = 0
             for vuln in scenario.injected_findings:
-                # Exact substring match (original)
                 exact = (vuln.title.lower() in finding_text
                          or vuln.category in finding_text
                          or vuln.resource_name.lower() in finding_text)
-                # Fuzzy keyword overlap match
                 keyword_hits = _keyword_overlap(vuln.title, finding_text)
                 if exact or keyword_hits >= 2:
-                    sev_bonus = SEVERITY_ORDER.get(vuln.severity, 1) * 0.15
-                    score = 0.5 + sev_bonus
-                    # Evidence bonus: reward findings backed by prior investigation
-                    resource = vuln.resource_name.lower()
-                    investigated = any(
-                        resource in h.get("command", "").lower()
-                        for h in history
-                        if not h["command"].startswith(("finding:", "remediate:"))
-                    )
-                    if investigated:
-                        score += 0.3
-                    if score > best_score:
-                        best_match = vuln
-                        best_score = score
-            if best_match:
-                suffix = " (evidence-backed)" if best_score > 0.5 + SEVERITY_ORDER.get(best_match.severity, 1) * 0.15 else ""
-                return best_score, f"Correctly identified: {best_match.title}{suffix}"
-            return 0.1, "Finding submitted but doesn't match known vulnerabilities."
+                    return 0.1, f"Correctly identified: {vuln.title}"
+            return -0.1, "Finding submitted but doesn't match known vulnerabilities."
 
-        # Remediation submission — heuristic scoring for common patterns
+        # Remediation submission — small per-step reward
         if cmd_lower.startswith("remediate:"):
             remediation_text = command[10:].strip().lower()
             for vuln in scenario.injected_findings:
                 resource = vuln.resource_name.lower()
                 if resource in remediation_text:
-                    # Exact delete command targeting a known-vulnerable resource
-                    if "kubectl delete" in remediation_text:
-                        return 0.5, f"Correct remediation: deleting {vuln.resource_kind}/{vuln.resource_name}"
-                    # Targets the right resource but uses a complex action (patch, etc.)
-                    return 0.3, f"Correct remediation target: {vuln.resource_kind}/{vuln.resource_name}"
-            # No resource match — defer complex remediations to LLM
-            return None, ""
+                    return 0.1, f"Correct remediation target: {vuln.resource_kind}/{vuln.resource_name}"
+            return -0.1, "Remediation doesn't target a known vulnerable resource."
 
-        # Valid investigation commands
+        # Valid investigation commands — small reward, capped at first 5
         _SCAN_COMMANDS = (
             "get pods", "get po", "get secrets", "get roles", "get clusterroles",
             "get rolebindings", "get clusterrolebindings", "get networkpolicies",
@@ -153,12 +128,22 @@ class SecurityJudge:
             "describe pod", "describe deployment", "describe role", "describe clusterrole",
             "describe sa", "describe secret", "describe netpol", "describe networkpolicy",
             "describe rolebinding", "describe clusterrolebinding",
-            "auth can-i", "get events",
+            "auth can-i", "get events", "get services", "get svc",
+            "get ingress", "get deployments", "get deploy",
+            "describe service", "describe ingress",
         )
         if any(p in cmd_lower for p in _SCAN_COMMANDS):
             if repeat_count == 1:
                 return -0.1, "Repeated investigation command — try a different approach."
-            return 0.2, "Good investigation step."
+            # Cap investigation rewards at first 5 unique commands
+            investigation_count = sum(
+                1 for h in history
+                if not h["command"].startswith(("finding:", "remediate:"))
+                and h.get("reward", 0) > 0
+            )
+            if investigation_count < 5:
+                return 0.05, "Good investigation step."
+            return 0.0, "Investigation step (reward capped)."
 
         return None, ""  # defer to LLM
 
@@ -222,7 +207,9 @@ Return JSON only: {{"score": <float -1.0 to 1.0>, "feedback": "<1-2 sentence eva
                          if f.severity in ("CRITICAL", "HIGH")]
         critical_high_found = sum(
             1 for f in critical_high
-            if any(f.title.lower() in ff.lower() or f.resource_name in ff for ff in found_findings)
+            if any(f.title.lower() in ff.lower() or f.resource_name in ff
+                   or _keyword_overlap(f.title, ff) >= 2
+                   for ff in found_findings)
         )
 
         # Must find all critical/high to pass
@@ -235,3 +222,82 @@ Return JSON only: {{"score": <float -1.0 to 1.0>, "feedback": "<1-2 sentence eva
             return True, f"Scan complete: {found_count}/{total} findings identified."
 
         return False, f"Incomplete scan: {found_count}/{total} findings. Keep investigating."
+
+    def compute_outcome_reward(
+        self,
+        scenario: VulnerabilityScenario,
+        found_findings: list[str],
+        history: list,
+        timed_out: bool,
+    ) -> tuple[float, str]:
+        """Compute episode outcome reward. Called once at episode end.
+
+        This is the dominant reward signal — 10-20x larger than per-step rewards.
+        """
+        total = len(scenario.injected_findings)
+        if total == 0:
+            return 2.0, "No vulnerabilities in scenario."
+
+        # Count matched findings (fuzzy)
+        matched_ids = set()
+        for ff in found_findings:
+            ff_lower = ff.lower()
+            for vuln in scenario.injected_findings:
+                if vuln.finding_id in matched_ids:
+                    continue
+                exact = (vuln.title.lower() in ff_lower
+                         or vuln.category in ff_lower
+                         or vuln.resource_name.lower() in ff_lower)
+                if exact or _keyword_overlap(vuln.title, ff_lower) >= 2:
+                    matched_ids.add(vuln.finding_id)
+                    break
+
+        matched_count = len(matched_ids)
+        match_ratio = matched_count / total
+
+        # Count critical/high found
+        critical_high = [f for f in scenario.injected_findings if f.severity in ("CRITICAL", "HIGH")]
+        ch_found = sum(1 for f in critical_high if f.finding_id in matched_ids)
+        all_ch_found = ch_found == len(critical_high) if critical_high else True
+
+        # Count successful remediations
+        remediation_count = sum(
+            1 for h in history
+            if h["command"].startswith("remediate:")
+            and h.get("feedback", "").startswith("Correct remediation")
+        )
+
+        # Compute outcome score
+        outcome = 0.0
+        reason_parts = []
+
+        if all_ch_found and match_ratio >= 0.7:
+            outcome = 5.0
+            reason_parts.append(f"full completion ({matched_count}/{total} findings)")
+        elif match_ratio >= 0.5:
+            outcome = 2.0
+            reason_parts.append(f"partial completion ({matched_count}/{total} findings)")
+        elif matched_count > 0:
+            outcome = 0.5
+            reason_parts.append(f"found {matched_count}/{total} findings")
+        else:
+            outcome = -3.0
+            reason_parts.append("no correct findings")
+
+        # Remediation bonus: +2.0 each, max +4.0
+        rem_bonus = min(remediation_count * 2.0, 4.0)
+        if rem_bonus > 0:
+            outcome += rem_bonus
+            reason_parts.append(f"+{rem_bonus:.0f} remediation bonus ({remediation_count} fixes)")
+
+        # Efficiency bonus (only if found something)
+        steps = len(history)
+        if matched_count > 0:
+            if steps <= 10:
+                outcome += 1.0
+                reason_parts.append("+1.0 efficiency (≤10 steps)")
+            elif steps <= 15:
+                outcome += 0.5
+                reason_parts.append("+0.5 efficiency (≤15 steps)")
+
+        return outcome, "Outcome: " + ", ".join(reason_parts)
