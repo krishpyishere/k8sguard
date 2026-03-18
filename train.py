@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import torch
 from datetime import datetime
 from pathlib import Path
 
@@ -367,9 +368,8 @@ def main() -> None:
         vllm_mode=args.vllm_mode,
         vllm_server_base_url=args.vllm_server_url if args.vllm_mode == "server" else None,
         vllm_server_timeout=args.vllm_server_timeout,
-        vllm_gpu_memory_utilization=0.7,
+        vllm_gpu_memory_utilization=0.3,
         vllm_max_model_length=4096,
-        vllm_enable_sleep_mode=True,
         output_dir=str(output_dir),
         max_steps=args.max_steps,
         num_train_epochs=args.num_epochs,
@@ -422,6 +422,9 @@ def main() -> None:
             total_rewards.append(episode["total_reward"])
             finding_rewards.append(episode["finding_reward"])
             remediation_rewards.append(episode["remediation_reward"])
+
+            # Prevent CUDA memory fragmentation from accumulating over episodes
+            torch.cuda.empty_cache()
 
         return {
             "prompt_ids": episode_prompt_ids,
