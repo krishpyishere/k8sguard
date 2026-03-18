@@ -281,8 +281,14 @@ Return JSON only: {{"score": <float -1.0 to 1.0>, "feedback": "<1-2 sentence eva
             outcome = 0.5
             reason_parts.append(f"found {matched_count}/{total} findings")
         else:
-            outcome = -3.0
-            reason_parts.append("no correct findings")
+            # Scale penalty by investigation quality for GRPO variance
+            unique_investigation = len(set(
+                h["command"] for h in history
+                if not h["command"].startswith(("finding:", "remediate:"))
+            ))
+            # -3.0 for no investigation, -1.0 for thorough investigation (10+ unique commands)
+            outcome = -3.0 + min(unique_investigation * 0.2, 2.0)
+            reason_parts.append(f"no correct findings (investigation: {unique_investigation} unique commands)")
 
         # Remediation bonus: +2.0 each, max +4.0
         rem_bonus = min(remediation_count * 2.0, 4.0)
